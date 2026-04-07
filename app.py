@@ -783,7 +783,7 @@ def apply_global_data_lock(df, sales_df, audit_df, scope):
 
 def get_default_page_for_role(role):
     if role == "Super_Admin":
-        return "🏢 კომპანიის მართვა"
+        return "🌍 გლობალური ანალიტიკა"
     if role == "Company_Admin":
         return "🤝 დისტრიბუტორების მართვა"
     if role == "Company_Operator":
@@ -1205,9 +1205,9 @@ elif role == "Company_Admin":
 elif role in ["Company_Operator", "Retail_Operator", "Supplier_Operator"]:
     pages = ["🛠 ოპერატორის პანელი", "📈 პროდუქტის ეფექტიანობა"]
 elif role == "Store_Manager":
-    pages = ["🏠 მაღაზიის პანელი", "🛒 გაყიდვები", "📥 მარაგების მიღება"]
+    pages = ["🏠 მაღაზიის პანელი", "🛒 გაყიდვები"]
 elif role == "Distributor":
-    pages = ["📍 ვიზიტები", "🚚 აუცილებელი მიწოდებები", "🔔 ინვენტარის გაფრთხილებები"]
+    pages = ["🚚 აუცილებელი მიწოდებები"]
 else:
     pages = ["🏢 კომპანიის მართვა"]
 # Stable navigation: keep radio state separate from programmatic redirects.
