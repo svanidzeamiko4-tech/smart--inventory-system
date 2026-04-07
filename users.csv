@@ -1,4 +1,4 @@
-username,password_hash,role,company,retail_chain,store,assigned_branch,commission_rate,allowed_stores,allowed_products
-admin,a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3,Super_Admin,Global,Global,,,0.0,,
-market,a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3,Store_Manager,Ifkli,Ifkli_Retail,ვაკის ფილიალი,ვაკის ფილიალი,0.0,ვაკის ფილიალი,
-distro,a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3,Distributor,Ifkli,Ifkli_Retail,,,0.05,გლდანის ფილიალი|ვაკის ფილიალი,Apple|Banana|Milk|Bread|Rice
+username,password,role,branch,company
+admin,123456,Super_Admin,all,all
+market,123,Store_Manager,Vake,none
+distro,123,Distributor,none,Ifkli

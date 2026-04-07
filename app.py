@@ -6,6 +6,7 @@ import random
 import math
 import json
 import hashlib
+from rs_connector import parse_rs_payload, simulate_fetch_waybill
 
 st.set_page_config(page_title="ERP Smart System", layout="wide")
 FILE_NAME = "Product.csv.txt"
@@ -233,6 +234,8 @@ def ensure_auth_files():
                 "qty",
                 "unit_price",
                 "total_sales",
+                "waybill_no",
+                "rs_status",
             ]
         ).to_csv(DELIVERY_LOG_FILE, index=False)
 
@@ -339,7 +342,17 @@ def load_balances_for_company(company_name):
     return balances_df[balances_df["company"].astype(str) == str(company_name)].copy()
 
 
-def append_delivery_log(username, company, store, product, qty, unit_price, delivery_id=None):
+def append_delivery_log(
+    username,
+    company,
+    store,
+    product,
+    qty,
+    unit_price,
+    delivery_id=None,
+    waybill_no="",
+    rs_status="Pending on RS.GE",
+):
     ts = datetime.now()
     row = {
         "id": delivery_id if delivery_id else f"del_{int(ts.timestamp() * 1000)}_{random.randint(1000, 9999)}",
@@ -352,11 +365,13 @@ def append_delivery_log(username, company, store, product, qty, unit_price, deli
         "qty": int(qty),
         "unit_price": float(unit_price),
         "total_sales": float(qty) * float(unit_price),
+        "waybill_no": str(waybill_no),
+        "rs_status": str(rs_status),
     }
     safe_append_row(
         DELIVERY_LOG_FILE,
         row,
-        ["id", "timestamp", "date", "username", "company", "store", "product", "qty", "unit_price", "total_sales"],
+        ["id", "timestamp", "date", "username", "company", "store", "product", "qty", "unit_price", "total_sales", "waybill_no", "rs_status"],
     )
 
 
@@ -434,12 +449,16 @@ def load_discrepancy_log():
 def load_delivery_log():
     ensure_auth_files()
     if not os.path.exists(DELIVERY_LOG_FILE):
-        return pd.DataFrame(columns=["id", "timestamp", "date", "username", "company", "store", "product", "qty", "unit_price", "total_sales"])
+        return pd.DataFrame(columns=["id", "timestamp", "date", "username", "company", "store", "product", "qty", "unit_price", "total_sales", "waybill_no", "rs_status"])
     ddf = pd.read_csv(DELIVERY_LOG_FILE)
     if ddf.empty:
         return ddf
     if "id" not in ddf.columns:
         ddf["id"] = [f"legacy_{i}" for i in range(len(ddf))]
+    if "waybill_no" not in ddf.columns:
+        ddf["waybill_no"] = ""
+    if "rs_status" not in ddf.columns:
+        ddf["rs_status"] = "Pending on RS.GE"
     ddf["timestamp"] = pd.to_datetime(ddf["timestamp"], errors="coerce")
     ddf["qty"] = pd.to_numeric(ddf["qty"], errors="coerce").fillna(0).astype(int)
     ddf["unit_price"] = pd.to_numeric(ddf["unit_price"], errors="coerce").fillna(0.0)
@@ -594,6 +613,8 @@ def load_users():
         users_df["username"] = ""
     if "password_hash" not in users_df.columns:
         users_df["password_hash"] = ""
+    if "password" not in users_df.columns:
+        users_df["password"] = ""
     if "role" not in users_df.columns:
         users_df["role"] = ""
     if "company" not in users_df.columns:
@@ -602,6 +623,8 @@ def load_users():
         users_df["retail_chain"] = ""
     if "store" not in users_df.columns:
         users_df["store"] = ""
+    if "branch" not in users_df.columns:
+        users_df["branch"] = ""
     if "assigned_branch" not in users_df.columns:
         users_df["assigned_branch"] = users_df["store"] if "store" in users_df.columns else ""
     if "allowed_stores" not in users_df.columns:
@@ -610,6 +633,21 @@ def load_users():
         users_df["allowed_products"] = ""
     if "commission_rate" not in users_df.columns:
         users_df["commission_rate"] = "0.0"
+
+    # Normalize simple schema (username,password,role,branch,company).
+    branch_map = {
+        "Vake": "ვაკის ფილიალი",
+        "Gldani": "გლდანის ფილიალი",
+        "Saburtalo": "საბურთალოს ფილიალი",
+        "Didube": "დიდუბის ფილიალი",
+        "none": "",
+        "all": "",
+    }
+    users_df["branch"] = users_df["branch"].astype(str)
+    users_df["branch"] = users_df["branch"].replace(branch_map)
+    users_df.loc[users_df["store"].astype(str) == "", "store"] = users_df["branch"]
+    users_df.loc[users_df["assigned_branch"].astype(str) == "", "assigned_branch"] = users_df["branch"]
+    users_df["company"] = users_df["company"].replace({"all": "Global", "none": ""})
 
     admin_exists = (users_df["username"].astype(str) == "admin").any()
     if not admin_exists:
@@ -649,8 +687,13 @@ def load_distributor_map():
 def authenticate_user(username, password):
     users = load_users()
     for user in users:
-        if user.get("username") == username and user.get("password_hash") == hash_password(password):
-            return user
+        if user.get("username") == username:
+            plain = str(user.get("password", ""))
+            hashed = str(user.get("password_hash", ""))
+            if plain and plain == password:
+                return user
+            if hashed and hashed == hash_password(password):
+                return user
     return None
 
 
@@ -676,6 +719,10 @@ def apply_role_filters(df, sales_df, auth_user, mapping_data):
 
     if role == "Distributor":
         allowed_stores = set(distributor_stores.get(username, set()))
+        if not allowed_stores:
+            allowed_stores = set([x for x in str(auth_user.get("allowed_stores", "")).split("|") if x])
+        if not allowed_stores:
+            allowed_stores = set(filtered_df["Store_Name"].astype(str).unique().tolist())
         allowed_products = set(company_products.get(company, set()))
         filtered_df = filtered_df[
             filtered_df["Store_Name"].astype(str).isin(allowed_stores)
@@ -799,6 +846,39 @@ def get_default_page_for_role(role):
 
 def save_data(df):
     return safe_write_csv(df, FILE_NAME)
+
+
+def ensure_product_row(df, store_name, product_name, qty, cost_price, selling_price):
+    mask = (
+        (df["Store_Name"].astype(str) == str(store_name))
+        & (df["Product_Name"].astype(str) == str(product_name))
+    )
+    if mask.any():
+        idx = df[mask].index[0]
+        df.at[idx, "Current_Stock"] = int(df.at[idx, "Current_Stock"]) + int(qty)
+        if float(df.at[idx].get("Cost_Price", 0)) <= 0:
+            df.at[idx, "Cost_Price"] = float(cost_price)
+        if float(df.at[idx].get("Selling_Price", 0)) <= 0:
+            df.at[idx, "Selling_Price"] = float(selling_price)
+        return df
+
+    new_row = {
+        "Store_Name": store_name,
+        "Product_Name": product_name,
+        "Current_Stock": int(qty),
+        "Cost_Price": float(cost_price),
+        "Selling_Price": float(selling_price),
+        "Price": float(selling_price),
+        "Sales_Day1": 0,
+        "Sales_Day2": 0,
+        "Sales_Day3": 0,
+        "Sales_Day4": 0,
+        "Sales_Day5": 0,
+        "Sales_Day6": 0,
+        "Sales_Day7": 0,
+        "Expiry_Date": pd.to_datetime(datetime.now().date() + timedelta(days=30)),
+    }
+    return pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
 
 def append_audit_log(store, product, old_stock, new_stock, difference, reason, cost_price):
@@ -1625,6 +1705,82 @@ elif page == "📥 მარაგების მიღება":
     st.title("📥 მარაგების მიღება")
     assigned_branch = auth_user.get("assigned_branch", "") or auth_user.get("store", "")
     st.caption(f"ფილიალი: {assigned_branch}")
+
+    st.subheader("RS.GE ზედნადების მიღება")
+    waybill_no = st.text_input("ზედნადების ნომერი", key="rs_waybill_no")
+    cwb1, cwb2 = st.columns([1, 1])
+    if cwb1.button("RS.GE-დან წამოღება", key="fetch_waybill_btn"):
+        if not waybill_no.strip():
+            st.warning("გთხოვთ მიუთითოთ ზედნადების ნომერი.")
+        else:
+            payload_text, payload_type = simulate_fetch_waybill(waybill_no.strip())
+            parsed = parse_rs_payload(payload_text)
+            st.session_state["rs_waybill_data"] = parsed
+            st.session_state["rs_waybill_format"] = payload_type
+            st.success(f"ზედნადები ჩაიტვირთა ({payload_type.upper()}).")
+            st.rerun()
+    if cwb2.button("გასუფთავება", key="clear_waybill_btn"):
+        st.session_state.pop("rs_waybill_data", None)
+        st.session_state.pop("rs_waybill_format", None)
+        st.rerun()
+
+    rs_data = st.session_state.get("rs_waybill_data")
+    if rs_data and rs_data.get("items"):
+        st.info(f"ზედნადები #{rs_data.get('waybill_no', '')} | ფორმატი: {st.session_state.get('rs_waybill_format', '').upper()}")
+        with st.form("rs_waybill_confirm_form"):
+            rs_store = assigned_branch
+            order_rows = []
+            for i, item in enumerate(rs_data.get("items", [])):
+                product = str(item.get("product", ""))
+                qty = st.number_input(
+                    f"{product} რაოდენობა",
+                    min_value=0,
+                    value=int(item.get("qty", 0)),
+                    step=1,
+                    key=f"rs_qty_{i}_{product}",
+                )
+                order_rows.append(
+                    {
+                        "product": product,
+                        "qty": int(qty),
+                        "cost_price": float(item.get("cost_price", 0.0)),
+                        "selling_price": float(item.get("selling_price", 0.0)),
+                    }
+                )
+            confirm_rs = st.form_submit_button("ზედნადების დადასტურება")
+
+        if confirm_rs:
+            full_df = st.session_state.df.copy()
+            company_name = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
+            for item in order_rows:
+                if item["qty"] <= 0:
+                    continue
+                full_df = ensure_product_row(
+                    full_df,
+                    rs_store,
+                    item["product"],
+                    item["qty"],
+                    item["cost_price"],
+                    item["selling_price"],
+                )
+                append_delivery_log(
+                    username=auth_user.get("username", ""),
+                    company=company_name,
+                    store=rs_store,
+                    product=item["product"],
+                    qty=item["qty"],
+                    unit_price=item["selling_price"],
+                    waybill_no=str(rs_data.get("waybill_no", "")),
+                    rs_status="Confirmed on RS.GE",
+                )
+            full_df = recalc_metrics(full_df)
+            save_products(full_df)
+            st.session_state.df = full_df
+            st.success("ზედნადები დამუშავდა. პროდუქცია განახლდა და RS.GE სტატუსი ჩაიწერა.")
+            st.session_state.pop("rs_waybill_data", None)
+            st.session_state.pop("rs_waybill_format", None)
+            st.rerun()
+
     pending_df = load_pending_deliveries()
     branch_pending = pending_df[
         (pending_df["store"].astype(str) == str(assigned_branch))
