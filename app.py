@@ -375,7 +375,7 @@ def append_delivery_log(
     )
 
 
-def append_pending_delivery(username, company, store, product, ordered_qty, unit_price):
+def append_pending_delivery(username, company, store, product, ordered_qty, unit_price, notes=""):
     ts = datetime.now()
     row = {
         "id": f"{int(ts.timestamp() * 1000)}_{random.randint(1000, 9999)}",
@@ -388,23 +388,52 @@ def append_pending_delivery(username, company, store, product, ordered_qty, unit
         "ordered_qty": int(ordered_qty),
         "unit_price": float(unit_price),
         "status": "pending",
+        "notes": str(notes),
+        "issue": "",
     }
     safe_append_row(
         PENDING_DELIVERY_FILE,
         row,
-        ["id", "timestamp", "date", "username", "company", "store", "product", "ordered_qty", "unit_price", "status"],
+        ["id", "timestamp", "date", "username", "company", "store", "product", "ordered_qty", "unit_price", "status", "notes", "issue"],
+    )
+
+
+def create_pending_delivery(username, company, store, product, ordered_qty, unit_price, notes="", issue=""):
+    ts = datetime.now()
+    row = {
+        "id": f"{int(ts.timestamp() * 1000)}_{random.randint(1000, 9999)}",
+        "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": ts.strftime("%Y-%m-%d"),
+        "username": str(username),
+        "company": str(company),
+        "store": str(store),
+        "product": str(product),
+        "ordered_qty": int(ordered_qty),
+        "unit_price": float(unit_price),
+        "status": "pending",
+        "notes": str(notes),
+        "issue": str(issue),
+    }
+    safe_append_row(
+        PENDING_DELIVERY_FILE,
+        row,
+        ["id", "timestamp", "date", "username", "company", "store", "product", "ordered_qty", "unit_price", "status", "notes", "issue"],
     )
 
 
 def load_pending_deliveries():
     ensure_auth_files()
     if not os.path.exists(PENDING_DELIVERY_FILE):
-        return pd.DataFrame(columns=["id", "timestamp", "date", "username", "company", "store", "product", "ordered_qty", "unit_price", "status"])
+        return pd.DataFrame(columns=["id", "timestamp", "date", "username", "company", "store", "product", "ordered_qty", "unit_price", "status", "notes", "issue"])
     pdf = pd.read_csv(PENDING_DELIVERY_FILE, dtype=str).fillna("")
     if pdf.empty:
         return pdf
     pdf["ordered_qty"] = pd.to_numeric(pdf["ordered_qty"], errors="coerce").fillna(0).astype(int)
     pdf["unit_price"] = pd.to_numeric(pdf["unit_price"], errors="coerce").fillna(0.0)
+    if "notes" not in pdf.columns:
+        pdf["notes"] = ""
+    if "issue" not in pdf.columns:
+        pdf["issue"] = ""
     return pdf
 
 
@@ -1482,115 +1511,115 @@ if page == "🏢 კომპანიის მართვა":
 
 elif page == "📍 ვიზიტები":
     st.title("📍 ვიზიტები")
-    st.caption("კლიენტების სია პრიორიტეტით - პირველ რიგში ყველაზე გადაუდებელი ვიზიტები.")
-    st.subheader("📊 ჩემი გამომუშავება")
-    commission_rate = float(auth_user.get("commission_rate", 0) or 0)
-    delivery_df = load_delivery_log()
-    my_deliveries = delivery_df[delivery_df["username"].astype(str) == str(auth_user.get("username", ""))] if not delivery_df.empty else delivery_df
-    today = datetime.now().date()
-    month_start = today.replace(day=1)
-    today_sales = float(
-        my_deliveries[my_deliveries["timestamp"].dt.date == today]["total_sales"].sum()
-    ) if not my_deliveries.empty else 0.0
-    month_sales = float(
-        my_deliveries[my_deliveries["timestamp"].dt.date >= month_start]["total_sales"].sum()
-    ) if not my_deliveries.empty else 0.0
-    today_earnings = today_sales * commission_rate
-    month_earnings = month_sales * commission_rate
-    e1, e2, e3 = st.columns(3)
-    e1.metric("დღევანდელი მიწოდება", f"{today_sales:.2f}")
-    e2.metric("დღევანდელი საკომისიო", f"{today_earnings:.2f}")
-    e3.metric("მიმდინარე თვის საკომისიო", f"{month_earnings:.2f}")
-
-    st.divider()
-    low_stock_alerts = get_low_stock_alerts(df, threshold=5)
+    st.caption("Apex სტილის მარშრუტი: მაღაზიების სია, აქტიური მიწოდება და ბორტის ნაშთი.")
     user_company = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
-    balances_df = load_balances_for_company(user_company)
+    commission_rate = float(auth_user.get("commission_rate", 0) or 0)
+    sales_df = sales_df_all.copy()
+    low_stock_alerts = get_low_stock_alerts(df, threshold=5)
+    pending_df = load_pending_deliveries()
+    delivery_df = load_delivery_log()
 
-    if low_stock_alerts.empty:
-        st.info("ვიზიტისთვის გადაუდებელი ობიექტები არ მოიძებნა.")
+    store_addresses = {
+        "გლდანის ფილიალი": "თბილისი, გლდანი",
+        "ვაკის ფილიალი": "თბილისი, ვაკე",
+        "საბურთალოს ფილიალი": "თბილისი, საბურთალო",
+        "დიდუბის ფილიალი": "თბილისი, დიდუბე",
+    }
+
+    st.subheader("🗺️ მაღაზიების სია")
+    assigned_stores = sorted(df["Store_Name"].astype(str).unique().tolist()) if not df.empty else []
+    if not assigned_stores:
+        st.info("მინიჭებული ვიზიტები არ არის.")
     else:
-        rows = []
-        for store_name, group in low_stock_alerts.groupby("Store_Name"):
-            critical = int((group["Current_Stock"] <= 0).sum())
-            low = int((group["Current_Stock"] > 0).sum())
-            shortage_points = int((5 - group["Current_Stock"].clip(upper=5)).sum())
-            urgency_score = critical * 10 + low * 4 + shortage_points
-            store_balance = balances_df[balances_df["store"].astype(str) == str(store_name)]["balance"].sum()
-            rows.append(
-                {
-                    "store": str(store_name),
-                    "critical": critical,
-                    "low": low,
-                    "urgency": urgency_score,
-                    "balance": float(store_balance),
-                }
-            )
-        visits_df = pd.DataFrame(rows).sort_values("urgency", ascending=False)
-
-        for _, visit in visits_df.iterrows():
-            store_name = visit["store"]
-            balance = float(visit["balance"])
-            balance_text = f"დავალიანება: {abs(balance):.2f}" if balance < 0 else f"კრედიტი: {balance:.2f}"
+        for store_name in assigned_stores:
+            has_pending = False
+            if not pending_df.empty:
+                has_pending = not pending_df[
+                    (pending_df["username"].astype(str) == str(auth_user.get("username", "")))
+                    & (pending_df["store"].astype(str) == str(store_name))
+                    & (pending_df["status"].astype(str) == "pending")
+                ].empty
+            status_icon = "⏳" if has_pending else "✅"
             with st.container(border=True):
-                st.markdown(f"### {store_name}")
-                st.markdown(
-                    f"**გადაუდებლობის ქულა:** {int(visit['urgency'])} | "
-                    f"**კრიტიკული პროდუქტი:** {int(visit['critical'])} | "
-                    f"**დაბალი ნაშთი:** {int(visit['low'])}"
-                )
-                st.markdown(f"**ბალანსი:** {balance_text}")
-                if st.button("შეკვეთის გახსნა", key=f"visit_open_{store_name}"):
+                st.markdown(f"### {status_icon} {store_name}")
+                st.markdown(f"**მისამართი:** {store_addresses.get(store_name, 'მისამართი არ არის მითითებული')}")
+                if st.button("ვიზიტის გახსნა", key=f"open_visit_{store_name}", use_container_width=True):
                     st.session_state["distributor_selected_store"] = store_name
                     st.rerun()
 
-        selected_store = st.session_state.get("distributor_selected_store", "")
-        if selected_store:
-            st.divider()
-            st.subheader(f"შეკვეთის ფორმა: {selected_store}")
-            store_items = low_stock_alerts[low_stock_alerts["Store_Name"].astype(str) == str(selected_store)]
-            if store_items.empty:
-                st.info("არჩეული ფილიალისთვის დაბალი ნაშთის რეკომენდაციები არ არის.")
-            else:
-                sales_df = sales_df_all.copy()
-                with st.form("distributor_order_form"):
-                    order_rows = []
-                    for i, (_, item) in enumerate(store_items.iterrows()):
-                        product_name = str(item["Product_Name"])
-                        current_stock = int(item["Current_Stock"])
-                        _, recommended_qty = get_restock_recommendation_qty(
-                            sales_df, product_name, selected_store, current_stock
+    selected_store = st.session_state.get("distributor_selected_store", "")
+    if selected_store:
+        st.divider()
+        st.subheader(f"🛒 აქტიური მიწოდება: {selected_store}")
+        store_items = low_stock_alerts[low_stock_alerts["Store_Name"].astype(str) == str(selected_store)]
+        if store_items.empty:
+            store_items = df[df["Store_Name"].astype(str) == str(selected_store)].head(6)
+        if store_items.empty:
+            st.info("ამ ფილიალზე პროდუქტი არ მოიძებნა.")
+        else:
+            with st.form("distributor_active_delivery_form"):
+                delivery_rows = []
+                for i, (_, item) in enumerate(store_items.iterrows()):
+                    product_name = str(item["Product_Name"])
+                    current_stock = int(item.get("Current_Stock", 0))
+                    _, recommended_qty = get_restock_recommendation_qty(
+                        sales_df, product_name, selected_store, current_stock
+                    )
+                    qty = st.number_input(
+                        f"{product_name} (ნაშთი: {current_stock})",
+                        min_value=0,
+                        value=max(0, int(recommended_qty)),
+                        step=1,
+                        key=f"dist_deliver_qty_{i}_{product_name}",
+                    )
+                    delivery_rows.append({"product": product_name, "qty": int(qty), "unit_price": float(item.get("Selling_Price", 0.0))})
+                delivery_notes = st.text_area("შენიშვნები (დაზიანება/კორექცია)", placeholder="მაგ: 2 ყუთი დაზიანებული იყო")
+                submit_delivery = st.form_submit_button("მიწოდების დადასტურება")
+            if submit_delivery:
+                confirmed = [r for r in delivery_rows if r["qty"] > 0]
+                if not confirmed:
+                    st.warning("გთხოვთ მიუთითოთ მინიმუმ ერთი პროდუქტის რაოდენობა.")
+                else:
+                    for item in confirmed:
+                        append_pending_delivery(
+                            username=auth_user.get("username", ""),
+                            company=user_company,
+                            store=selected_store,
+                            product=item["product"],
+                            ordered_qty=item["qty"],
+                            unit_price=item["unit_price"],
+                            notes=delivery_notes.strip(),
                         )
-                        qty = st.number_input(
-                            f"{product_name} (ნაშთი: {current_stock})",
-                            min_value=0,
-                            value=max(0, int(recommended_qty)),
-                            step=1,
-                            key=f"dist_order_qty_{i}_{product_name}",
-                        )
-                        order_rows.append({"product": product_name, "qty": int(qty)})
-                    submit_order = st.form_submit_button("შეკვეთის დადასტურება")
-                if submit_order:
-                    confirmed = [r for r in order_rows if r["qty"] > 0]
-                    if not confirmed:
-                        st.warning("შეკვეთაში რაოდენობა არ არის მითითებული.")
-                    else:
-                        price_map = (
-                            store_items.set_index("Product_Name")["Selling_Price"].to_dict()
-                            if "Selling_Price" in store_items.columns
-                            else {}
-                        )
-                        for item in confirmed:
-                            append_pending_delivery(
-                                username=auth_user.get("username", ""),
-                                company=user_company,
-                                store=selected_store,
-                                product=item["product"],
-                                ordered_qty=item["qty"],
-                                unit_price=float(price_map.get(item["product"], 0.0)),
-                            )
-                        st.success(f"{selected_store}-ისთვის შეკვეთა გადაიგზავნა დასადასტურებლად ({len(confirmed)} პროდუქტი).")
-                        st.rerun()
+                    st.success(f"{selected_store}-ისთვის მიწოდება გაიგზავნა დასადასტურებლად.")
+                    st.rerun()
+
+    st.divider()
+    st.subheader("📦 ჩემი ნაშთი (ბორტზე)")
+    my_pending = pending_df[
+        (pending_df["username"].astype(str) == str(auth_user.get("username", "")))
+        & (pending_df["status"].astype(str) == "pending")
+    ] if not pending_df.empty else pending_df
+    if my_pending.empty:
+        st.info("ბორტზე აქტიური მიწოდება არ არის.")
+    else:
+        truck_df = (
+            my_pending.groupby("product", as_index=False)["ordered_qty"].sum()
+            .rename(columns={"product": "პროდუქტი", "ordered_qty": "რაოდენობა"})
+            .sort_values("რაოდენობა", ascending=False)
+        )
+        st.dataframe(truck_df, use_container_width=True)
+
+    st.divider()
+    st.subheader("📊 ჩემი გამომუშავება")
+    my_deliveries = delivery_df[delivery_df["username"].astype(str) == str(auth_user.get("username", ""))] if not delivery_df.empty else delivery_df
+    today = datetime.now().date()
+    today_sales = float(
+        my_deliveries[my_deliveries["timestamp"].dt.date == today]["total_sales"].sum()
+    ) if not my_deliveries.empty else 0.0
+    estimated_commission = today_sales * commission_rate
+    f1, f2 = st.columns(2)
+    f1.metric("Total Sales Today", f"{today_sales:.2f}")
+    f2.metric("Estimated Commission", f"{estimated_commission:.2f}")
 
     correction_df = load_correction_log()
     my_corrections = correction_df[correction_df["distributor"].astype(str) == str(auth_user.get("username", ""))] if not correction_df.empty else correction_df
@@ -1617,21 +1646,145 @@ elif page == "📍 ვიზიტები":
 
 elif page == "🚚 აუცილებელი მიწოდებები":
     st.title("🚚 აუცილებელი მიწოდებები")
-    st.caption("დისტრიბუტორის მარტივი ხედვა - რა უნდა მიეწოდოს ახლავე.")
-    sales_df = sales_df_all.copy()
+    st.caption("დისტრიბუტორის სამუშაო ეკრანი — მარშრუტი, ვიზიტი, ბორტის ნაშთი.")
+
+    delivery_df = load_delivery_log()
+    user_company = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
+    commission_rate = float(auth_user.get("commission_rate", 0) or 0)
+    today = datetime.now().date()
+    my_deliveries_today = delivery_df[
+        (delivery_df["username"].astype(str) == str(auth_user.get("username", "")))
+        & (delivery_df["timestamp"].dt.date == today)
+    ] if not delivery_df.empty else delivery_df
+    total_sales_today = float(my_deliveries_today["total_sales"].sum()) if not my_deliveries_today.empty else 0.0
+    commission_today = total_sales_today * commission_rate
+
+    s1, s2 = st.columns(2)
+    s1.metric("Daily Total", f"₾{total_sales_today:.2f}")
+    s2.metric("ჩემი საკომისიო", f"₾{commission_today:.2f}")
+
+    store_addresses = {
+        "გლდანის ფილიალი": "თბილისი, გლდანი",
+        "ვაკის ფილიალი": "თბილისი, ვაკე",
+        "საბურთალოს ფილიალი": "თბილისი, საბურთალო",
+        "დიდუბის ფილიალი": "თბილისი, დიდუბე",
+    }
     low_stock_alerts = get_low_stock_alerts(df, threshold=5)
-    if low_stock_alerts.empty:
-        st.info("ამ ეტაპზე გადაუდებელი მიწოდება არ არის.")
-    else:
-        for _, row in low_stock_alerts.iterrows():
-            store_name = str(row["Store_Name"])
-            product_name = str(row["Product_Name"])
-            current_stock = int(row["Current_Stock"])
-            _, recommended_qty = get_restock_recommendation_qty(sales_df, product_name, store_name, current_stock)
-            if current_stock <= 0:
-                st.error(f"{store_name} - {product_name}: ნაშთი 0. მიაწოდეთ მინიმუმ {recommended_qty} ერთეული.")
-            else:
-                st.warning(f"{store_name} - {product_name}: ნაშთი {current_stock}. რეკომენდაცია: +{recommended_qty} ერთეული.")
+
+    route_tab, stock_tab = st.tabs(["🗺️ მარშრუტი", "📦 ბორტის ნაშთი"])
+
+    with route_tab:
+        assigned_stores = sorted(df["Store_Name"].astype(str).unique().tolist()) if not df.empty else []
+        if not assigned_stores:
+            st.info("მარშრუტზე მაღაზიები არ არის მინიჭებული.")
+        else:
+            for store_name in assigned_stores:
+                st.markdown(f"### 🏪 {store_name}")
+                st.caption(f"მისამართი: {store_addresses.get(store_name, 'მისამართი არ არის მითითებული')}")
+                if st.button("ვიზიტის დაწყება", key=f"route_start_{store_name}", use_container_width=True):
+                    st.session_state["active_route_store"] = store_name
+                    st.rerun()
+
+            active_store = st.session_state.get("active_route_store", "")
+            if active_store:
+                st.divider()
+                st.subheader(f"🚚 მიწოდების ფორმა — {active_store}")
+                store_items = low_stock_alerts[low_stock_alerts["Store_Name"].astype(str) == str(active_store)]
+                if store_items.empty:
+                    store_items = df[df["Store_Name"].astype(str) == str(active_store)].head(8)
+                if store_items.empty:
+                    st.info("პროდუქტები ვერ მოიძებნა ამ ვიზიტისთვის.")
+                else:
+                    with st.form("visit_delivery_confirm_form"):
+                        row_items = []
+                        for i, (_, item) in enumerate(store_items.iterrows()):
+                            product_name = str(item["Product_Name"])
+                            current_stock = int(item.get("Current_Stock", 0))
+                            _, rec_qty = get_restock_recommendation_qty(
+                                sales_df_all, product_name, active_store, current_stock
+                            )
+                            c1, c2 = st.columns([2, 1])
+                            delivered_qty = c1.number_input(
+                                f"{product_name} — მიწოდებული რაოდენობა",
+                                min_value=0,
+                                value=max(0, int(rec_qty)),
+                                step=1,
+                                key=f"deliver_qty_{i}_{product_name}",
+                            )
+                            issue = c2.selectbox(
+                                f"Issue ({product_name})",
+                                ["None", "Damaged", "Missing", "Return"],
+                                key=f"deliver_issue_{i}_{product_name}",
+                            )
+                            row_items.append(
+                                {
+                                    "product": product_name,
+                                    "qty": int(delivered_qty),
+                                    "issue": issue,
+                                    "unit_price": float(item.get("Selling_Price", 0.0)),
+                                }
+                            )
+                        notes = st.text_area("შენიშვნები", placeholder="დაზიანება/დანაკლისი/დაბრუნება")
+                        confirm_delivery = st.form_submit_button("Confirm Delivery", use_container_width=True)
+
+                    if confirm_delivery:
+                        valid_rows = [r for r in row_items if r["qty"] > 0]
+                        if not valid_rows:
+                            st.warning("მიუთითეთ მინიმუმ ერთი პროდუქტის მიწოდებული რაოდენობა.")
+                        else:
+                            full_df = st.session_state.df.copy()
+                            for r in valid_rows:
+                                full_df = ensure_product_row(
+                                    full_df,
+                                    active_store,
+                                    r["product"],
+                                    r["qty"],
+                                    0.0,
+                                    r["unit_price"],
+                                )
+                                append_delivery_log(
+                                    username=auth_user.get("username", ""),
+                                    company=user_company,
+                                    store=active_store,
+                                    product=r["product"],
+                                    qty=r["qty"],
+                                    unit_price=r["unit_price"],
+                                    rs_status="Pending on RS.GE",
+                                )
+                                if r["issue"] != "None" or notes.strip():
+                                    append_discrepancy_log(
+                                        distributor=str(auth_user.get("username", "")),
+                                        company=user_company,
+                                        store=active_store,
+                                        product=r["product"],
+                                        ordered_qty=r["qty"],
+                                        confirmed_qty=r["qty"],
+                                        reason=f"Issue={r['issue']} | {notes.strip()}",
+                                        corrected_by=str(auth_user.get("username", "")),
+                                    )
+                            full_df = recalc_metrics(full_df)
+                            save_products(full_df)
+                            st.session_state.df = full_df
+                            st.success("მიწოდება დადასტურდა და ბაზა განახლდა.")
+                            st.rerun()
+
+    with stock_tab:
+        my_all_deliveries = delivery_df[delivery_df["username"].astype(str) == str(auth_user.get("username", ""))] if not delivery_df.empty else delivery_df
+        if my_all_deliveries.empty:
+            st.info("ბორტის ნაშთისთვის ჩანაწერები არ არის.")
+        else:
+            delivered_by_product = (
+                my_all_deliveries.groupby("product", as_index=False)["qty"].sum()
+                .rename(columns={"product": "პროდუქტი", "qty": "ჯამურად მიწოდებული"})
+            )
+            delivered_by_product["დილის დატვირთვა (სიმულაცია)"] = delivered_by_product["ჯამურად მიწოდებული"] + 20
+            delivered_by_product["ბორტის ნაშთი"] = (
+                delivered_by_product["დილის დატვირთვა (სიმულაცია)"] - delivered_by_product["ჯამურად მიწოდებული"]
+            ).clip(lower=0)
+            st.dataframe(
+                delivered_by_product[["პროდუქტი", "დილის დატვირთვა (სიმულაცია)", "ჯამურად მიწოდებული", "ბორტის ნაშთი"]],
+                use_container_width=True,
+            )
 
 elif page == "🔔 ინვენტარის გაფრთხილებები":
     st.title("🔔 ინვენტარის გაფრთხილებები")
@@ -1655,17 +1808,77 @@ elif page == "🏠 მაღაზიის პანელი":
     sales_df = sales_df_all.copy()
     low_stock_alerts = get_low_stock_alerts(df, threshold=5)
     c1, c2, c3 = st.columns(3)
-    c1.metric("პროდუქტი", len(df))
-    c2.metric("დაბალი ნაშთი", len(low_stock_alerts))
-    c3.metric("დღიური მოგება", f"{st.session_state.daily_profit:.2f}")
+    with c1:
+        st.markdown("### 📦 სულ პროდუქტი")
+        st.metric("Total Products", len(df))
+    with c2:
+        st.markdown("### 🚨 დაბალი ნაშთი")
+        st.error(f"Low Stock Alerts: {len(low_stock_alerts)}")
+    with c3:
+        st.markdown("### 💰 დღიური მოგება")
+        st.metric("Daily Profit", f"{st.session_state.daily_profit:.2f}")
+
+    st.divider()
+    st.subheader("✅ დღიური To-Do")
     if low_stock_alerts.empty:
-        st.info("დაბალი ნაშთის გაფრთხილება არ არის.")
+        st.info("დღეს დაბალი ნაშთის ამოცანები არ არის.")
     else:
-        for _, row in low_stock_alerts.iterrows():
+        for idx, row in low_stock_alerts.iterrows():
             product_name = str(row["Product_Name"])
             current_stock = int(row["Current_Stock"])
             _, recommended_qty = get_restock_recommendation_qty(sales_df, product_name, assigned_branch, current_stock)
-            st.warning(f"რეკომენდაცია: მოითხოვეთ {product_name} დისტრიბუტორისგან (+{recommended_qty}).")
+            t1, t2 = st.columns([5, 1])
+            t1.warning(f"შეუკვეთე {product_name} (+{recommended_qty}) | მიმდინარე ნაშთი: {current_stock}")
+            if t2.button("Order Now", key=f"sm_order_now_{idx}"):
+                st.session_state.pending_page = "📥 მარაგების მიღება"
+                st.session_state.prefill_product = product_name
+                st.session_state.prefill_qty = max(1, int(recommended_qty))
+                st.rerun()
+
+    st.divider()
+    st.subheader("📥 ბოლო მიღებები (5)")
+    pending_df = load_pending_deliveries()
+    delivery_df = load_delivery_log()
+    incoming_rows = []
+    if not delivery_df.empty:
+        ddf = delivery_df[delivery_df["store"].astype(str) == str(assigned_branch)].copy()
+        for _, r in ddf.iterrows():
+            incoming_rows.append(
+                {
+                    "დრო": r["timestamp"],
+                    "პროდუქტი": r["product"],
+                    "რაოდენობა": int(r["qty"]),
+                    "სტატუსი": "Confirmed",
+                }
+            )
+    if not pending_df.empty:
+        pdf = pending_df[pending_df["store"].astype(str) == str(assigned_branch)].copy()
+        for _, r in pdf.iterrows():
+            incoming_rows.append(
+                {
+                    "დრო": r["timestamp"],
+                    "პროდუქტი": r["product"],
+                    "რაოდენობა": int(r["ordered_qty"]),
+                    "სტატუსი": "Pending" if str(r["status"]) == "pending" else "Confirmed",
+                }
+            )
+    if incoming_rows:
+        incoming_df = pd.DataFrame(incoming_rows).sort_values("დრო", ascending=False).head(5)
+        st.dataframe(incoming_df, use_container_width=True)
+    else:
+        st.info("მიღების ჩანაწერები ვერ მოიძებნა.")
+
+    st.divider()
+    st.subheader("⚡ სწრაფი ქმედებები")
+    qa1, qa2, qa3 = st.columns(3)
+    if qa1.button("📋 Inventory Count", use_container_width=True):
+        st.session_state.pending_page = "📥 მარაგების მიღება"
+        st.rerun()
+    if qa2.button("🧾 Report Loss", use_container_width=True):
+        st.session_state.pending_page = "📥 მარაგების მიღება"
+        st.rerun()
+    if qa3.button("📞 Contact Supplier", use_container_width=True):
+        st.info("დაუკავშირდით თქვენს დისტრიბუტორს შიდა საკონტაქტო არხით.")
 
 elif page == "🛒 გაყიდვები":
     st.title("🛒 გაყიდვები")
@@ -1799,6 +2012,9 @@ elif page == "📥 მარაგების მიღება":
             with st.container(border=True):
                 st.markdown(f"**პროდუქტი:** {product_name} | **შეკვეთილი რაოდენობა:** {ordered_qty}")
                 st.caption(f"დისტრიბუტორი: {distributor_name}")
+                issue_text = str(p.get("issue", "None"))
+                notes_text = str(p.get("notes", ""))
+                st.caption(f"Issue: {issue_text} | შენიშვნა: {notes_text if notes_text else '-'}")
                 final_qty = st.number_input(
                     f"მიღებული რაოდენობა ({product_name})",
                     min_value=0,
