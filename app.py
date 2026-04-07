@@ -72,8 +72,10 @@ def load_audit_log():
 def append_sales_log(sale_date, store, product, qty, selling_price, cost_price):
     revenue = float(qty) * float(selling_price)
     profit = float(qty) * (float(selling_price) - float(cost_price))
+    sale_ts = pd.to_datetime(sale_date)
     log_row = {
-        "Date": pd.to_datetime(sale_date).strftime("%Y-%m-%d"),
+        "Timestamp": sale_ts.strftime("%Y-%m-%d %H:%M:%S"),
+        "Date": sale_ts.strftime("%Y-%m-%d"),
         "Store": str(store),
         "Product": str(product),
         "Qty": int(qty),
@@ -90,15 +92,25 @@ def append_sales_log(sale_date, store, product, qty, selling_price, cost_price):
 def load_sales_log():
     if os.path.exists(SALES_LOG_FILE):
         sales_df = pd.read_csv(SALES_LOG_FILE)
-        required_cols = ["Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"]
+        required_cols = ["Timestamp", "Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"]
         for col in required_cols:
             if col not in sales_df.columns:
                 sales_df[col] = 0 if col in ["Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"] else ""
-        sales_df["Date"] = pd.to_datetime(sales_df["Date"], errors="coerce")
+
+        # Backward compatibility: old logs may only have Date without time.
+        if "Timestamp" in sales_df.columns:
+            sales_df["Timestamp"] = pd.to_datetime(sales_df["Timestamp"], errors="coerce")
+        else:
+            sales_df["Timestamp"] = pd.NaT
+
+        fallback_ts = pd.to_datetime(sales_df["Date"], errors="coerce")
+        sales_df["Timestamp"] = sales_df["Timestamp"].fillna(fallback_ts)
+        sales_df["Date"] = sales_df["Timestamp"].dt.date
+
         for numeric_col in ["Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"]:
             sales_df[numeric_col] = pd.to_numeric(sales_df[numeric_col], errors="coerce").fillna(0)
-        return sales_df.dropna(subset=["Date"])
-    return pd.DataFrame(columns=["Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"])
+        return sales_df.dropna(subset=["Timestamp"])
+    return pd.DataFrame(columns=["Timestamp", "Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"])
 
 
 def recalc_metrics(df):
@@ -214,7 +226,8 @@ elif page == "📦 Inventory List":
         c5.write(row["დარჩენილი დღე"])
         c6.write(row["დღე ვადის გასვლამდე"])
         can_sell = row["Current_Stock"] > 0
-        if c7.button("Sell", key=f"sell_{index}", disabled=not can_sell):
+        sell_key = f"sell_btn_{int(index)}_{str(row.get('Product_Name', ''))}_{str(row.get('Store_Name', ''))}"
+        if c7.button("Sell", key=sell_key, disabled=not can_sell):
             unit_profit = float(row.get("Selling_Price", 0)) - float(row.get("Cost_Price", 0))
             st.session_state.daily_profit += unit_profit
             append_sales_log(
@@ -355,9 +368,9 @@ elif page == "📈 Detailed Analytics":
     selected_store = f2.selectbox("Store Filter", store_options)
 
     if sales_df.empty:
-        st.info("No sales data available yet. Sell items from Inventory List to populate analytics.")
+        st.info("ჯერ გაყიდვები არ ფიქსირდება")
     else:
-        sales_df["DateOnly"] = sales_df["Date"].dt.date
+        sales_df["DateOnly"] = sales_df["Timestamp"].dt.date
         filtered_sales = sales_df[
             (sales_df["DateOnly"] >= start_date) &
             (sales_df["DateOnly"] <= end_date)
@@ -371,7 +384,7 @@ elif page == "📈 Detailed Analytics":
         m3.metric("🧾 Items Sold", int(filtered_sales["Qty"].sum()))
 
         if filtered_sales.empty:
-            st.warning("No sales found for the selected date range and store.")
+            st.info("ჯერ გაყიდვები არ ფიქსირდება")
         else:
             st.divider()
             st.subheader("Daily Sales Trend")
