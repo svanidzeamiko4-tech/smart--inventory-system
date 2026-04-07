@@ -18,6 +18,7 @@ BALANCE_FILE = "balances.csv"
 DELIVERY_LOG_FILE = "deliveries_log.csv"
 PENDING_DELIVERY_FILE = "pending_deliveries.csv"
 DISCREPANCY_LOG_FILE = "discrepancy_log.csv"
+CORRECTION_LOG_FILE = "correction_log.csv"
 STORE_NAME_MAP = {
     "Gldani_Branch": "გლდანის ფილიალი",
     "Vake_Branch": "ვაკის ფილიალი",
@@ -149,6 +150,7 @@ def ensure_auth_files():
     if not os.path.exists(DELIVERY_LOG_FILE):
         pd.DataFrame(
             columns=[
+                "id",
                 "timestamp",
                 "date",
                 "username",
@@ -192,6 +194,23 @@ def ensure_auth_files():
             ]
         ).to_csv(DISCREPANCY_LOG_FILE, index=False)
 
+    if not os.path.exists(CORRECTION_LOG_FILE):
+        pd.DataFrame(
+            columns=[
+                "timestamp",
+                "delivery_id",
+                "distributor",
+                "company",
+                "store",
+                "product",
+                "original_qty",
+                "updated_qty",
+                "difference",
+                "reason",
+                "updated_by",
+            ]
+        ).to_csv(CORRECTION_LOG_FILE, index=False)
+
 
 def load_mapping():
     ensure_auth_files()
@@ -228,9 +247,10 @@ def load_balances_for_company(company_name):
     return balances_df[balances_df["company"].astype(str) == str(company_name)].copy()
 
 
-def append_delivery_log(username, company, store, product, qty, unit_price):
+def append_delivery_log(username, company, store, product, qty, unit_price, delivery_id=None):
     ts = datetime.now()
     row = {
+        "id": delivery_id if delivery_id else f"del_{int(ts.timestamp() * 1000)}_{random.randint(1000, 9999)}",
         "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
         "date": ts.strftime("%Y-%m-%d"),
         "username": str(username),
@@ -322,13 +342,54 @@ def load_discrepancy_log():
 def load_delivery_log():
     ensure_auth_files()
     if not os.path.exists(DELIVERY_LOG_FILE):
-        return pd.DataFrame(columns=["timestamp", "date", "username", "company", "store", "product", "qty", "unit_price", "total_sales"])
+        return pd.DataFrame(columns=["id", "timestamp", "date", "username", "company", "store", "product", "qty", "unit_price", "total_sales"])
     ddf = pd.read_csv(DELIVERY_LOG_FILE)
     if ddf.empty:
         return ddf
+    if "id" not in ddf.columns:
+        ddf["id"] = [f"legacy_{i}" for i in range(len(ddf))]
     ddf["timestamp"] = pd.to_datetime(ddf["timestamp"], errors="coerce")
+    ddf["qty"] = pd.to_numeric(ddf["qty"], errors="coerce").fillna(0).astype(int)
+    ddf["unit_price"] = pd.to_numeric(ddf["unit_price"], errors="coerce").fillna(0.0)
     ddf["total_sales"] = pd.to_numeric(ddf["total_sales"], errors="coerce").fillna(0.0)
     return ddf.dropna(subset=["timestamp"])
+
+
+def save_delivery_log(ddf):
+    ddf.to_csv(DELIVERY_LOG_FILE, index=False)
+
+
+def append_correction_log(delivery_id, distributor, company, store, product, original_qty, updated_qty, reason, updated_by):
+    row = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "delivery_id": str(delivery_id),
+        "distributor": str(distributor),
+        "company": str(company),
+        "store": str(store),
+        "product": str(product),
+        "original_qty": int(original_qty),
+        "updated_qty": int(updated_qty),
+        "difference": int(updated_qty) - int(original_qty),
+        "reason": str(reason),
+        "updated_by": str(updated_by),
+    }
+    pd.DataFrame([row]).to_csv(
+        CORRECTION_LOG_FILE,
+        mode="a",
+        header=not os.path.exists(CORRECTION_LOG_FILE) or os.path.getsize(CORRECTION_LOG_FILE) == 0,
+        index=False,
+    )
+
+
+def load_correction_log():
+    ensure_auth_files()
+    if not os.path.exists(CORRECTION_LOG_FILE):
+        return pd.DataFrame(columns=["timestamp", "delivery_id", "distributor", "company", "store", "product", "original_qty", "updated_qty", "difference", "reason", "updated_by"])
+    cdf = pd.read_csv(CORRECTION_LOG_FILE)
+    if cdf.empty:
+        return cdf
+    cdf["timestamp"] = pd.to_datetime(cdf["timestamp"], errors="coerce")
+    return cdf
 
 
 def load_users():
@@ -989,6 +1050,27 @@ if page == "🏢 კომპანიის მართვა":
         )
         st.dataframe(top_distributors, use_container_width=True)
 
+    st.divider()
+    st.subheader("Correction Log")
+    correction_df = load_correction_log()
+    if correction_df.empty:
+        st.info("კორექციის ჩანაწერები არ არის.")
+    else:
+        corr_display = correction_df[["timestamp", "distributor", "store", "product", "original_qty", "updated_qty", "difference", "reason", "updated_by"]].rename(
+            columns={
+                "timestamp": "დრო",
+                "distributor": "დისტრიბუტორი",
+                "store": "ფილიალი",
+                "product": "პროდუქტი",
+                "original_qty": "საწყისი",
+                "updated_qty": "განახლებული",
+                "difference": "სხვაობა",
+                "reason": "მიზეზი",
+                "updated_by": "განაახლა",
+            }
+        )
+        st.dataframe(corr_display.sort_values("დრო", ascending=False), use_container_width=True)
+
     zero_stock = df[df["Current_Stock"] <= 0]
     expiring_soon = df[df["დღე ვადის გასვლამდე"] <= 3]
 
@@ -1187,6 +1269,29 @@ elif page == "📍 ვიზიტები":
                         st.success(f"{selected_store}-ისთვის შეკვეთა გადაიგზავნა დასადასტურებლად ({len(confirmed)} პროდუქტი).")
                         st.rerun()
 
+    correction_df = load_correction_log()
+    my_corrections = correction_df[correction_df["distributor"].astype(str) == str(auth_user.get("username", ""))] if not correction_df.empty else correction_df
+    st.divider()
+    st.subheader("კორექციის ჟურნალი")
+    if my_corrections.empty:
+        st.info("კორექციის ჩანაწერები არ არის.")
+    else:
+        st.dataframe(
+            my_corrections[["timestamp", "store", "product", "original_qty", "updated_qty", "difference", "reason"]]
+            .rename(
+                columns={
+                    "timestamp": "დრო",
+                    "store": "ფილიალი",
+                    "product": "პროდუქტი",
+                    "original_qty": "საწყისი რაოდენობა",
+                    "updated_qty": "განახლებული რაოდენობა",
+                    "difference": "სხვაობა",
+                    "reason": "მიზეზი",
+                }
+            ),
+            use_container_width=True,
+        )
+
 elif page == "🚚 აუცილებელი მიწოდებები":
     st.title("🚚 აუცილებელი მიწოდებები")
     st.caption("დისტრიბუტორის მარტივი ხედვა - რა უნდა მიეწოდოს ახლავე.")
@@ -1357,6 +1462,7 @@ elif page == "📥 მარაგების მიღება":
                         product=product_name,
                         qty=int(final_qty),
                         unit_price=float(p["unit_price"]),
+                        delivery_id=pid,
                     )
 
                     if int(final_qty) < ordered_qty:
@@ -1374,6 +1480,87 @@ elif page == "📥 მარაგების მიღება":
                     save_pending_deliveries(pending_df)
                     st.success("მიღება დადასტურდა და მარაგი განახლდა.")
                     st.rerun()
+
+    st.divider()
+    st.subheader("Post-Confirmation Correction (24 საათი)")
+    delivery_df = load_delivery_log()
+    if delivery_df.empty:
+        st.info("დადასტურებული მიწოდებები არ არის.")
+    else:
+        now_ts = datetime.now()
+        editable = delivery_df[
+            (delivery_df["store"].astype(str) == str(assigned_branch))
+            & (delivery_df["timestamp"] >= (now_ts - timedelta(hours=24)))
+        ]
+        locked = delivery_df[
+            (delivery_df["store"].astype(str) == str(assigned_branch))
+            & (delivery_df["timestamp"] < (now_ts - timedelta(hours=24)))
+        ]
+
+        if editable.empty:
+            st.info("24 საათიან ფანჯარაში ჩასწორებადი ჩანაწერი არ არის.")
+        else:
+            for _, drow in editable.iterrows():
+                did = str(drow["id"])
+                old_qty = int(drow["qty"])
+                product_name = str(drow["product"])
+                distributor_name = str(drow["username"])
+                unit_price = float(drow["unit_price"])
+                with st.container(border=True):
+                    st.markdown(f"**{product_name}** | დისტრიბუტორი: {distributor_name} | მიმდინარე: {old_qty}")
+                    new_qty = st.number_input(
+                        f"განახლებული რაოდენობა ({product_name})",
+                        min_value=0,
+                        value=old_qty,
+                        step=1,
+                        key=f"corr_qty_{did}",
+                    )
+                    corr_reason = st.text_input(
+                        "კორექციის მიზეზი",
+                        key=f"corr_reason_{did}",
+                        placeholder="მაგ: დაზიანება, დანაკლისი",
+                    )
+                    if st.button("კორექციის შენახვა", key=f"corr_save_{did}"):
+                        if int(new_qty) == old_qty:
+                            st.info("რაოდენობა უცვლელია.")
+                        elif not corr_reason.strip():
+                            st.warning("გთხოვთ მიუთითოთ კორექციის მიზეზი.")
+                        else:
+                            diff = int(new_qty) - old_qty
+                            full_df = st.session_state.df.copy()
+                            mask = (
+                                (full_df["Store_Name"].astype(str) == str(assigned_branch))
+                                & (full_df["Product_Name"].astype(str) == str(product_name))
+                            )
+                            if mask.any():
+                                idx_first = full_df[mask].index[0]
+                                full_df.at[idx_first, "Current_Stock"] = max(
+                                    0, int(full_df.at[idx_first, "Current_Stock"]) + diff
+                                )
+                                full_df = recalc_metrics(full_df)
+                                save_data(full_df)
+                                st.session_state.df = full_df
+
+                            delivery_df.loc[delivery_df["id"].astype(str) == did, "qty"] = int(new_qty)
+                            delivery_df.loc[delivery_df["id"].astype(str) == did, "total_sales"] = float(new_qty) * unit_price
+                            save_delivery_log(delivery_df)
+
+                            append_correction_log(
+                                delivery_id=did,
+                                distributor=distributor_name,
+                                company=str(drow["company"]),
+                                store=assigned_branch,
+                                product=product_name,
+                                original_qty=old_qty,
+                                updated_qty=int(new_qty),
+                                reason=corr_reason.strip(),
+                                updated_by=str(auth_user.get("username", "")),
+                            )
+                            st.success("კორექცია შენახულია. მარაგი და საკომისიო სინქრონიზებულია.")
+                            st.rerun()
+
+        if not locked.empty:
+            st.warning("ზოგი ჩანაწერი 24 საათზე ძველია და რედაქტირება დაბლოკილია. საჭიროა Super_Admin approval.")
 
 elif page == "📦 პროდუქციის სია":
     st.title("📦 პროდუქციის სია")
