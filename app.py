@@ -29,9 +29,44 @@ STORE_NAME_MAP = {
 }
 
 # 1. მონაცემების მართვა
+PRODUCT_NUMERIC_COLUMNS = [
+    "Current_Stock",
+    "Price",
+    "Cost_Price",
+    "Selling_Price",
+    "Sales_Day1",
+    "Sales_Day2",
+    "Sales_Day3",
+    "Sales_Day4",
+    "Sales_Day5",
+    "Sales_Day6",
+    "Sales_Day7",
+]
+
+
+def normalize_product_df(df):
+    if df is None:
+        return pd.DataFrame()
+    if df.empty:
+        base_cols = ["Store_Name", "Product_Name", "Expiry_Date"] + PRODUCT_NUMERIC_COLUMNS
+        for col in base_cols:
+            if col not in df.columns:
+                df[col] = [] if col in ["Store_Name", "Product_Name"] else pd.Series(dtype="float64")
+        return df
+    for col in ["Store_Name", "Product_Name", "Expiry_Date"]:
+        if col not in df.columns:
+            df[col] = ""
+    for col in PRODUCT_NUMERIC_COLUMNS:
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["Expiry_Date"] = pd.to_datetime(df["Expiry_Date"], errors="coerce")
+    return df
+
+
 def ensure_data_structure(df):
     if df.empty:
-        return df
+        return normalize_product_df(df)
 
     if "Cost_Price" not in df.columns:
         df["Cost_Price"] = 0.0
@@ -44,13 +79,13 @@ def ensure_data_structure(df):
 
     df["Cost_Price"] = pd.to_numeric(df["Cost_Price"], errors="coerce").fillna(0.0)
     df["Selling_Price"] = pd.to_numeric(df["Selling_Price"], errors="coerce").fillna(0.0)
-    return df
+    return normalize_product_df(df)
 
 
 def load_data():
     if os.path.exists(FILE_NAME):
         df = pd.read_csv(FILE_NAME)
-        df['Expiry_Date'] = pd.to_datetime(df['Expiry_Date'])
+        df = normalize_product_df(df)
         df = ensure_data_structure(df)
         return df
     return pd.DataFrame()
@@ -874,6 +909,8 @@ def get_default_page_for_role(role):
 
 
 def save_data(df):
+    df = normalize_product_df(df.copy())
+    df = ensure_data_structure(df)
     return safe_write_csv(df, FILE_NAME)
 
 
@@ -896,6 +933,11 @@ def ensure_product_row(df, store_name, product_name, qty, cost_price, selling_pr
     cost_price = _to_float(cost_price, 0.0)
     selling_price = _to_float(selling_price, 0.0)
 
+    # Ensure core columns exist before any row-level access.
+    for col in ["Cost_Price", "Selling_Price", "Price", "Current_Stock"]:
+        if col not in df.columns:
+            df[col] = 0
+
     # Robust sync: match by normalized store/product to avoid type/text mismatches.
     mask = (
         (df["Store_Name"].astype(str).str.strip() == store_name)
@@ -903,11 +945,16 @@ def ensure_product_row(df, store_name, product_name, qty, cost_price, selling_pr
     )
     if mask.any():
         idx = df[mask].index[0]
+        row = df.loc[idx]
+        current_cost = _to_float(row["Cost_Price"] if "Cost_Price" in df.columns else 0.0, 0.0)
+        current_sell = _to_float(row["Selling_Price"] if "Selling_Price" in df.columns else 0.0, 0.0)
         df.at[idx, "Current_Stock"] = _to_int(df.at[idx, "Current_Stock"], 0) + qty
-        if _to_float(df.at[idx].get("Cost_Price", 0), 0.0) <= 0:
+        if pd.isna(current_cost) or current_cost <= 0:
             df.at[idx, "Cost_Price"] = cost_price
-        if _to_float(df.at[idx].get("Selling_Price", 0), 0.0) <= 0:
+        if pd.isna(current_sell) or current_sell <= 0:
             df.at[idx, "Selling_Price"] = selling_price
+        if "Price" in df.columns and (_to_float(row["Price"], 0.0) <= 0):
+            df.at[idx, "Price"] = selling_price
         return df
 
     new_row = {
@@ -1737,9 +1784,9 @@ elif page == "🚚 აუცილებელი მიწოდებები
                             )
                             row_items.append(
                                 {
-                                    "product": product_name,
+                                    "product": str(product_name).strip(),
                                     "qty": int(delivered_qty),
-                                    "issue": issue,
+                                    "issue": str(issue) if issue is not None else "",
                                     "unit_price": float(item.get("Selling_Price", 0.0)),
                                 }
                             )
@@ -1747,7 +1794,7 @@ elif page == "🚚 აუცილებელი მიწოდებები
                         confirm_delivery = st.form_submit_button("Confirm Delivery", use_container_width=True)
 
                     if confirm_delivery:
-                        valid_rows = [r for r in row_items if r["qty"] > 0]
+                        valid_rows = [r for r in row_items if r["qty"] > 0 and str(r.get("product", "")).strip()]
                         if not valid_rows:
                             st.warning("მიუთითეთ მინიმუმ ერთი პროდუქტის მიწოდებული რაოდენობა.")
                         else:
