@@ -15,6 +15,7 @@ USERS_FILE = "users.csv"
 DISTRIBUTOR_MAP_FILE = "distributor_mapping.json"
 MAPPING_FILE = "mapping.csv"
 BALANCE_FILE = "balances.csv"
+DELIVERY_LOG_FILE = "deliveries_log.csv"
 STORE_NAME_MAP = {
     "Gldani_Branch": "გლდანის ფილიალი",
     "Vake_Branch": "ვაკის ფილიალი",
@@ -64,6 +65,7 @@ def ensure_auth_files():
                     "role": "Super_Admin",
                     "company": "Global",
                     "store": "",
+                    "commission_rate": 0.0,
                     "allowed_stores": "",
                     "allowed_products": "",
                 },
@@ -74,6 +76,7 @@ def ensure_auth_files():
                     "company": "Ifkli",
                     "store": "გლდანის ფილიალი",
                     "assigned_branch": "გლდანის ფილიალი",
+                    "commission_rate": 0.0,
                     "allowed_stores": "გლდანის ფილიალი",
                     "allowed_products": "",
                 },
@@ -84,6 +87,7 @@ def ensure_auth_files():
                     "company": "Ifkli",
                     "store": "",
                     "assigned_branch": "",
+                    "commission_rate": 0.0,
                     "allowed_stores": "გლდანის ფილიალი|ვაკის ფილიალი",
                     "allowed_products": "Apple|Banana|Milk|Bread|Rice",
                 },
@@ -94,6 +98,7 @@ def ensure_auth_files():
                     "company": "Ifkli",
                     "store": "",
                     "assigned_branch": "",
+                    "commission_rate": 0.05,
                     "allowed_stores": "გლდანის ფილიალი|ვაკის ფილიალი",
                     "allowed_products": "Apple|Banana|Milk|Bread|Rice",
                 },
@@ -139,6 +144,21 @@ def ensure_auth_files():
         )
         default_balances.to_csv(BALANCE_FILE, index=False)
 
+    if not os.path.exists(DELIVERY_LOG_FILE):
+        pd.DataFrame(
+            columns=[
+                "timestamp",
+                "date",
+                "username",
+                "company",
+                "store",
+                "product",
+                "qty",
+                "unit_price",
+                "total_sales",
+            ]
+        ).to_csv(DELIVERY_LOG_FILE, index=False)
+
 
 def load_mapping():
     ensure_auth_files()
@@ -175,6 +195,39 @@ def load_balances_for_company(company_name):
     return balances_df[balances_df["company"].astype(str) == str(company_name)].copy()
 
 
+def append_delivery_log(username, company, store, product, qty, unit_price):
+    ts = datetime.now()
+    row = {
+        "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": ts.strftime("%Y-%m-%d"),
+        "username": str(username),
+        "company": str(company),
+        "store": str(store),
+        "product": str(product),
+        "qty": int(qty),
+        "unit_price": float(unit_price),
+        "total_sales": float(qty) * float(unit_price),
+    }
+    pd.DataFrame([row]).to_csv(
+        DELIVERY_LOG_FILE,
+        mode="a",
+        header=not os.path.exists(DELIVERY_LOG_FILE) or os.path.getsize(DELIVERY_LOG_FILE) == 0,
+        index=False,
+    )
+
+
+def load_delivery_log():
+    ensure_auth_files()
+    if not os.path.exists(DELIVERY_LOG_FILE):
+        return pd.DataFrame(columns=["timestamp", "date", "username", "company", "store", "product", "qty", "unit_price", "total_sales"])
+    ddf = pd.read_csv(DELIVERY_LOG_FILE)
+    if ddf.empty:
+        return ddf
+    ddf["timestamp"] = pd.to_datetime(ddf["timestamp"], errors="coerce")
+    ddf["total_sales"] = pd.to_numeric(ddf["total_sales"], errors="coerce").fillna(0.0)
+    return ddf.dropna(subset=["timestamp"])
+
+
 def load_users():
     ensure_auth_files()
     users_df = pd.read_csv(USERS_FILE, dtype=str).fillna("")
@@ -196,6 +249,8 @@ def load_users():
         users_df["allowed_stores"] = ""
     if "allowed_products" not in users_df.columns:
         users_df["allowed_products"] = ""
+    if "commission_rate" not in users_df.columns:
+        users_df["commission_rate"] = "0.0"
 
     admin_exists = (users_df["username"].astype(str) == "admin").any()
     if not admin_exists:
@@ -208,6 +263,7 @@ def load_users():
                     "company": "Global",
                     "store": "",
                     "assigned_branch": "",
+                    "commission_rate": 0.0,
                     "allowed_stores": "",
                     "allowed_products": "",
                 }
@@ -906,6 +962,26 @@ if page == "🏢 კომპანიის მართვა":
 elif page == "📍 ვიზიტები":
     st.title("📍 ვიზიტები")
     st.caption("კლიენტების სია პრიორიტეტით - პირველ რიგში ყველაზე გადაუდებელი ვიზიტები.")
+    st.subheader("📊 ჩემი გამომუშავება")
+    commission_rate = float(auth_user.get("commission_rate", 0) or 0)
+    delivery_df = load_delivery_log()
+    my_deliveries = delivery_df[delivery_df["username"].astype(str) == str(auth_user.get("username", ""))] if not delivery_df.empty else delivery_df
+    today = datetime.now().date()
+    month_start = today.replace(day=1)
+    today_sales = float(
+        my_deliveries[my_deliveries["timestamp"].dt.date == today]["total_sales"].sum()
+    ) if not my_deliveries.empty else 0.0
+    month_sales = float(
+        my_deliveries[my_deliveries["timestamp"].dt.date >= month_start]["total_sales"].sum()
+    ) if not my_deliveries.empty else 0.0
+    today_earnings = today_sales * commission_rate
+    month_earnings = month_sales * commission_rate
+    e1, e2, e3 = st.columns(3)
+    e1.metric("დღევანდელი მიწოდება", f"{today_sales:.2f}")
+    e2.metric("დღევანდელი საკომისიო", f"{today_earnings:.2f}")
+    e3.metric("მიმდინარე თვის საკომისიო", f"{month_earnings:.2f}")
+
+    st.divider()
     low_stock_alerts = get_low_stock_alerts(df, threshold=5)
     user_company = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
     balances_df = load_balances_for_company(user_company)
@@ -978,7 +1054,22 @@ elif page == "📍 ვიზიტები":
                     if not confirmed:
                         st.warning("შეკვეთაში რაოდენობა არ არის მითითებული.")
                     else:
+                        price_map = (
+                            store_items.set_index("Product_Name")["Selling_Price"].to_dict()
+                            if "Selling_Price" in store_items.columns
+                            else {}
+                        )
+                        for item in confirmed:
+                            append_delivery_log(
+                                username=auth_user.get("username", ""),
+                                company=user_company,
+                                store=selected_store,
+                                product=item["product"],
+                                qty=item["qty"],
+                                unit_price=float(price_map.get(item["product"], 0.0)),
+                            )
                         st.success(f"{selected_store}-ისთვის შეკვეთა მომზადდა ({len(confirmed)} პროდუქტი).")
+                        st.rerun()
 
 elif page == "🚚 აუცილებელი მიწოდებები":
     st.title("🚚 აუცილებელი მიწოდებები")
