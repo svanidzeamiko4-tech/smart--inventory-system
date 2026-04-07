@@ -114,6 +114,12 @@ def load_sales_log():
     return pd.DataFrame(columns=["Timestamp", "Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"])
 
 
+def reset_system_data():
+    for file_path in [FILE_NAME, SALES_LOG_FILE]:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
 def generate_month_sales_simulation(current_df, transactions=10000):
     stores = ["Gldani_Branch", "Vake_Branch", "Saburtalo_Branch", "Didube_Branch"]
     products = [
@@ -191,6 +197,16 @@ def generate_month_sales_simulation(current_df, transactions=10000):
 
 
 def recalc_metrics(df):
+    required_base_cols = ["Store_Name", "Product_Name", "Current_Stock", "Cost_Price", "Selling_Price", "Expiry_Date"]
+    for col in required_base_cols:
+        if col not in df.columns:
+            if col in ["Current_Stock", "Cost_Price", "Selling_Price"]:
+                df[col] = 0
+            elif col == "Expiry_Date":
+                df[col] = pd.NaT
+            else:
+                df[col] = ""
+
     sales_cols = [f"Sales_Day{i}" for i in range(1, 8)]
     for col in sales_cols:
         if col in df.columns:
@@ -244,6 +260,21 @@ page = st.sidebar.radio(
         "📊 Reports",
     ]
 )
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🚀 Demo Mode")
+if st.sidebar.button("Generate 10,000 Sales (Simulation)", use_container_width=True):
+    st.session_state.df = generate_month_sales_simulation(st.session_state.df, transactions=10000)
+    st.session_state.daily_profit = 0.0
+    st.session_state.profit_date = datetime.now().strftime("%Y-%m-%d")
+    st.rerun()
+
+if st.sidebar.button("🗑️ Reset System", use_container_width=True):
+    reset_system_data()
+    st.session_state.df = pd.DataFrame()
+    st.session_state.daily_profit = 0.0
+    st.session_state.profit_date = datetime.now().strftime("%Y-%m-%d")
+    st.rerun()
 
 # --- გვერდი 1: DASHBOARD ---
 if page == "🏠 Dashboard":
@@ -410,12 +441,6 @@ elif page == "🔍 Stock Audit (აღწერა)":
 elif page == "📈 Detailed Analytics":
     st.title("📈 Detailed Analytics")
     st.caption("Analyze revenue, profit, and sales volume by period and branch.")
-
-    if st.button("Generate 1-Month Simulation (10,000 Sales)"):
-        st.session_state.df = generate_month_sales_simulation(st.session_state.df, transactions=10000)
-        st.session_state.daily_profit = 0.0
-        st.success("Simulation complete: 10,000 sales generated over the last 30 days.")
-        st.rerun()
 
     df = st.session_state.df
     sales_df = load_sales_log()
