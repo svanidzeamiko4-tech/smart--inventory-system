@@ -252,24 +252,24 @@ st.sidebar.title("🎛️ მართვის პანელი")
 page = st.sidebar.radio(
     "გადადი გვერდზე:",
     [
-        "🏠 Dashboard",
-        "📦 Inventory List",
-        "📥 Add New Stock (ზედნადები)",
-        "🔍 Stock Audit (აღწერა)",
-        "📈 Detailed Analytics",
-        "📊 Reports",
+        "🏠 მთავარი პანელი",
+        "📦 პროდუქციის სია",
+        "📥 საქონლის მიღება",
+        "🔍 ინვენტარიზაცია",
+        "📈 დეტალური ანალიტიკა",
+        "📊 ანგარიშები",
     ]
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🚀 Demo Mode")
-if st.sidebar.button("Generate 10,000 Sales (Simulation)", use_container_width=True):
+st.sidebar.subheader("🚀 საჩვენებელი რეჟიმი")
+if st.sidebar.button("10,000 გაყიდვის გენერირება (სიმულაცია)", use_container_width=True):
     st.session_state.df = generate_month_sales_simulation(st.session_state.df, transactions=10000)
     st.session_state.daily_profit = 0.0
     st.session_state.profit_date = datetime.now().strftime("%Y-%m-%d")
     st.rerun()
 
-if st.sidebar.button("🗑️ Reset System", use_container_width=True):
+if st.sidebar.button("🗑️ სისტემის გასუფთავება", use_container_width=True):
     reset_system_data()
     st.session_state.df = pd.DataFrame()
     st.session_state.daily_profit = 0.0
@@ -277,9 +277,9 @@ if st.sidebar.button("🗑️ Reset System", use_container_width=True):
     st.rerun()
 
 # --- გვერდი 1: DASHBOARD ---
-if page == "🏠 Dashboard":
-    st.title("🏠 Dashboard")
-    st.caption("High-level overview of inventory health and profitability.")
+if page == "🏠 მთავარი პანელი":
+    st.title("🏠 მთავარი პანელი")
+    st.caption("მარაგებისა და მომგებიანობის მოკლე მიმოხილვა.")
 
     zero_stock = df[df["Current_Stock"] <= 0]
     expiring_soon = df[df["დღე ვადის გასვლამდე"] <= 3]
@@ -300,15 +300,15 @@ if page == "🏠 Dashboard":
 
     # High-level metrics only.
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("📦 Total Products", len(df))
-    c2.metric("📉 Low Stock Alerts", len(df[df["დარჩენილი დღე"] < 3]))
-    c3.metric("⚠️ Expiry Alerts", len(expiring_soon))
-    c4.metric("💰 Daily Profit", f"{st.session_state.daily_profit:.2f}")
+    c1.metric("📦 სულ პროდუქცია", len(df))
+    c2.metric("📉 დაბალი ნაშთის გაფრთხილება", len(df[df["დარჩენილი დღე"] < 3]))
+    c3.metric("⚠️ ვადის გაფრთხილება", len(expiring_soon))
+    c4.metric("💰 დღიური მოგება", f"{st.session_state.daily_profit:.2f}")
 
-elif page == "📦 Inventory List":
-    st.title("📦 Inventory List")
-    st.caption("Search products and process one-click sales.")
-    search_term = st.text_input("🔎 Search Product", placeholder="Type product or store name...")
+elif page == "📦 პროდუქციის სია":
+    st.title("📦 პროდუქციის სია")
+    st.caption("იპოვე პროდუქტი სწრაფად და განახორციელე გაყიდვა.")
+    search_term = st.text_input("🔎 პროდუქტის ძიება", placeholder="შეიყვანე პროდუქტის ან ფილიალის სახელი...")
 
     filtered_df = df.copy()
     if search_term.strip():
@@ -320,7 +320,7 @@ elif page == "📦 Inventory List":
 
     header_cols = st.columns([2, 2, 1, 1, 1, 1, 1, 1])
     for col, title in zip(header_cols, [
-        "Store", "Product", "Stock", "Cost", "Sell Price", "Days Left", "Expiry (Days)", "Action"
+        "ფილიალი", "პროდუქტი", "ნაშთი", "თვითღირებულება", "გასაყიდი ფასი", "დარჩენილი დღე", "ვადა (დღე)", "მოქმედება"
     ]):
         col.markdown(f"**{title}**")
 
@@ -335,7 +335,7 @@ elif page == "📦 Inventory List":
         c6.write(row["დღე ვადის გასვლამდე"])
         can_sell = row["Current_Stock"] > 0
         sell_key = f"sell_btn_{int(index)}_{str(row.get('Product_Name', ''))}_{str(row.get('Store_Name', ''))}"
-        if c7.button("Sell", key=sell_key, disabled=not can_sell):
+        if c7.button("გაყიდვა", key=sell_key, disabled=not can_sell):
             unit_profit = float(row.get("Selling_Price", 0)) - float(row.get("Cost_Price", 0))
             st.session_state.daily_profit += unit_profit
             append_sales_log(
@@ -352,26 +352,26 @@ elif page == "📦 Inventory List":
             st.session_state.df = df
             st.rerun()
         if not can_sell:
-            c7.caption("Out")
+            c7.caption("ამოიწურა")
 
     if filtered_df.empty:
-        st.info("No products found for this search.")
+        st.info("მოცემული ძიებით პროდუქტი ვერ მოიძებნა.")
 
-elif page == "📥 Add New Stock (ზედნადები)":
-    st.title("📥 Add New Stock (ზედნადები)")
-    st.caption("Invoice-style entry for new inventory.")
+elif page == "📥 საქონლის მიღება":
+    st.title("📥 საქონლის მიღება")
+    st.caption("ახალი საქონლის მიღება ზედნადების ფორმატში.")
 
     with st.container(border=True):
-        st.markdown("### 🧾 Invoice Entry")
-        st.markdown("Fill the invoice details and save the stock line item.")
+        st.markdown("### 🧾 ზედნადების შევსება")
+        st.markdown("შეავსე ზედნადების ინფორმაცია და შეინახე პროდუქტის ჩანაწერი.")
 
     with st.form("manual_add"):
         col1, col2 = st.columns(2, gap="large")
         f_store = col1.selectbox("მაღაზია", df["Store_Name"].unique() if not df.empty else ["Gldani_Branch"])
         f_name = col2.text_input("პროდუქტი")
         f_qty = col1.number_input("რაოდენობა", min_value=1)
-        f_cost_price = col1.number_input("Cost Price", min_value=0.0, format="%.2f")
-        f_selling_price = col2.number_input("Selling Price", min_value=0.0, format="%.2f")
+        f_cost_price = col1.number_input("თვითღირებულება", min_value=0.0, format="%.2f")
+        f_selling_price = col2.number_input("გასაყიდი ფასი", min_value=0.0, format="%.2f")
         f_expiry = col2.date_input("ვადა")
         submitted = st.form_submit_button("შენახვა")
 
@@ -399,25 +399,25 @@ elif page == "📥 Add New Stock (ზედნადები)":
         st.success("პროდუქტი შენახულია")
         st.experimental_rerun()
 
-elif page == "🔍 Stock Audit (აღწერა)":
-    st.title("🔍 Stock Audit (აღწერა)")
-    st.caption("Adjust stock with a required reason for accounting traceability.")
+elif page == "🔍 ინვენტარიზაცია":
+    st.title("🔍 ინვენტარიზაცია")
+    st.caption("ნაშთის კორექტირება მიზეზის მითითებით ბუღალტრული კონტროლისთვის.")
 
     if df.empty:
         st.info("პროდუქტები არ არის დამატებული.")
     else:
         options = {
-            f"{row['Store_Name']} | {row['Product_Name']} (Stock: {int(row['Current_Stock'])})": idx
+            f"{row['Store_Name']} | {row['Product_Name']} (ნაშთი: {int(row['Current_Stock'])})": idx
             for idx, row in df.iterrows()
         }
-        reasons = ["Damaged", "Expired", "Inventory Mismatch", "Other"]
+        reasons = ["დაზიანებული", "ვადაგასული", "ინვენტარიზაციის აცდენა", "სხვა"]
 
         with st.form("inventory_audit_form"):
             selected_label = st.selectbox("აირჩიე პროდუქტი", list(options.keys()))
             selected_idx = options[selected_label]
             current_stock = int(df.at[selected_idx, "Current_Stock"])
             new_stock = st.number_input("ახალი ნაშთი", min_value=0, value=current_stock, step=1)
-            reason = st.selectbox("Reason", reasons)
+            reason = st.selectbox("მიზეზი", reasons)
             submitted_audit = st.form_submit_button("განახლება და ლოგირება")
 
         if submitted_audit:
@@ -435,12 +435,12 @@ elif page == "🔍 Stock Audit (აღწერა)":
                 save_data(df)
                 st.session_state.df = df
                 append_audit_log(product_name, old_stock, updated_stock, difference, reason, cost_price)
-                st.success("ინვენტარის ცვლილება შენახულია და audit log განახლდა.")
+                st.success("ინვენტარის ცვლილება შენახულია და აუდიტის ჟურნალი განახლდა.")
                 st.rerun()
 
-elif page == "📈 Detailed Analytics":
-    st.title("📈 Detailed Analytics")
-    st.caption("Analyze revenue, profit, and sales volume by period and branch.")
+elif page == "📈 დეტალური ანალიტიკა":
+    st.title("📈 დეტალური ანალიტიკა")
+    st.caption("შემოსავლის, მოგებისა და გაყიდვების მოცულობის ანალიზი პერიოდებისა და ფილიალების მიხედვით.")
 
     df = st.session_state.df
     sales_df = load_sales_log()
@@ -451,19 +451,19 @@ elif page == "📈 Detailed Analytics":
         st.session_state.analytics_end = datetime.now().date()
 
     q1, q2, q3 = st.columns(3)
-    if q1.button("Last 7 Days", use_container_width=True):
+    if q1.button("ბოლო 7 დღე", use_container_width=True):
         st.session_state.analytics_start = datetime.now().date() - timedelta(days=6)
         st.session_state.analytics_end = datetime.now().date()
-    if q2.button("Last 15 Days", use_container_width=True):
+    if q2.button("ბოლო 15 დღე", use_container_width=True):
         st.session_state.analytics_start = datetime.now().date() - timedelta(days=14)
         st.session_state.analytics_end = datetime.now().date()
-    if q3.button("Last 30 Days", use_container_width=True):
+    if q3.button("ბოლო 30 დღე", use_container_width=True):
         st.session_state.analytics_start = datetime.now().date() - timedelta(days=29)
         st.session_state.analytics_end = datetime.now().date()
 
     f1, f2 = st.columns([2, 1])
     selected_range = f1.date_input(
-        "Date Range",
+        "თარიღების დიაპაზონი",
         value=(st.session_state.analytics_start, st.session_state.analytics_end),
     )
     if isinstance(selected_range, tuple) and len(selected_range) == 2:
@@ -474,8 +474,8 @@ elif page == "📈 Detailed Analytics":
         start_date = st.session_state.analytics_start
         end_date = st.session_state.analytics_end
 
-    store_options = ["All Branches"] + sorted(df["Store_Name"].astype(str).unique().tolist()) if not df.empty else ["All Branches"]
-    selected_store = f2.selectbox("Store Filter", store_options)
+    store_options = ["ყველა ფილიალი"] + sorted(df["Store_Name"].astype(str).unique().tolist()) if not df.empty else ["ყველა ფილიალი"]
+    selected_store = f2.selectbox("ფილიალის ფილტრი", store_options)
 
     if sales_df.empty:
         st.info("ჯერ გაყიდვები არ ფიქსირდება")
@@ -485,59 +485,79 @@ elif page == "📈 Detailed Analytics":
             (sales_df["DateOnly"] >= start_date) &
             (sales_df["DateOnly"] <= end_date)
         ]
-        if selected_store != "All Branches":
+        if selected_store != "ყველა ფილიალი":
             filtered_sales = filtered_sales[filtered_sales["Store"] == selected_store]
 
         m1, m2, m3 = st.columns(3)
-        m1.metric("💵 Total Revenue", f"{filtered_sales['Revenue'].sum():.2f}")
-        m2.metric("📈 Total Profit", f"{filtered_sales['Profit'].sum():.2f}")
-        m3.metric("🧾 Items Sold", int(filtered_sales["Qty"].sum()))
+        m1.metric("💵 მთლიანი შემოსავალი", f"{filtered_sales['Revenue'].sum():.2f}")
+        m2.metric("📈 მთლიანი მოგება", f"{filtered_sales['Profit'].sum():.2f}")
+        m3.metric("🧾 გაყიდული ერთეულები", int(filtered_sales["Qty"].sum()))
 
         if filtered_sales.empty:
             st.info("ჯერ გაყიდვები არ ფიქსირდება")
         else:
             st.divider()
-            st.subheader("Daily Sales Trend")
+            st.subheader("დღიური გაყიდვების ტრენდი")
             daily_sales = filtered_sales.groupby("DateOnly", as_index=False)["Revenue"].sum()
             daily_sales = daily_sales.rename(columns={"DateOnly": "Date"})
             st.line_chart(daily_sales.set_index("Date")["Revenue"])
 
             c_chart1, c_chart2 = st.columns(2)
             with c_chart1:
-                st.subheader("Sales by Store")
+                st.subheader("გაყიდვები ფილიალების მიხედვით")
                 sales_by_store = filtered_sales.groupby("Store", as_index=False)["Revenue"].sum()
                 st.bar_chart(sales_by_store.set_index("Store")["Revenue"])
             with c_chart2:
-                st.subheader("Profit by Branch")
+                st.subheader("მოგება ფილიალების მიხედვით")
                 profit_by_store = filtered_sales.groupby("Store", as_index=False)["Profit"].sum()
                 st.bar_chart(profit_by_store.set_index("Store")["Profit"])
 
-elif page == "📊 Reports":
-    st.title("📊 Reports")
-    st.caption("Organized reporting tabs for management and accounting.")
+elif page == "📊 ანგარიშები":
+    st.title("📊 ანგარიშები")
+    st.caption("მოწესრიგებული ანგარიშები მენეჯმენტისა და ბუღალტრული კონტროლისთვის.")
 
-    report_tab1, report_tab2 = st.tabs(["📉 ზარალის ანგარიში", "📦 Inventory Overview"])
+    report_tab1, report_tab2 = st.tabs(["📉 ზარალის ანგარიში", "📦 მარაგების მიმოხილვა"])
     audit_df = load_audit_log()
 
     with report_tab1:
         total_shrinkage_value = float(audit_df["Shrinkage_Value"].sum()) if not audit_df.empty else 0.0
         total_shrinkage_units = int((-audit_df["Difference"]).clip(lower=0).sum()) if not audit_df.empty else 0
         c1, c2 = st.columns(2)
-        c1.metric("ჯამური ზარალი (Cost საფუძველზე)", f"{total_shrinkage_value:.2f}")
+        c1.metric("ჯამური ზარალი (თვითღირებულებით)", f"{total_shrinkage_value:.2f}")
         c2.metric("დაკარგული ერთეულები", total_shrinkage_units)
         if not audit_df.empty:
+            audit_display = audit_df[["Date", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Shrinkage_Value"]].rename(
+                columns={
+                    "Date": "თარიღი",
+                    "Product": "პროდუქტი",
+                    "Old Stock": "ძველი ნაშთი",
+                    "New Stock": "ახალი ნაშთი",
+                    "Difference": "სხვაობა",
+                    "Reason": "მიზეზი",
+                    "Shrinkage_Value": "ზარალის ღირებულება",
+                }
+            )
             st.dataframe(
-                audit_df[["Date", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Shrinkage_Value"]],
+                audit_display,
                 use_container_width=True
             )
         else:
-            st.info("Audit ჩანაწერები ჯერ არ არსებობს.")
+            st.info("აუდიტის ჩანაწერები ჯერ არ არსებობს.")
 
     with report_tab2:
-        st.metric("Inventory Value (Cost)", f"{(df['Current_Stock'] * df['Cost_Price']).sum():.2f}" if not df.empty else "0.00")
+        st.metric("მარაგის ღირებულება (თვითღირებულებით)", f"{(df['Current_Stock'] * df['Cost_Price']).sum():.2f}" if not df.empty else "0.00")
         if not df.empty:
             st.bar_chart(df.set_index("Product_Name")["Current_Stock"])
             overview_cols = ["Store_Name", "Product_Name", "Current_Stock", "Cost_Price", "Selling_Price", "დღე ვადის გასვლამდე"]
-            st.dataframe(df[overview_cols], use_container_width=True)
+            overview_display = df[overview_cols].rename(
+                columns={
+                    "Store_Name": "ფილიალი",
+                    "Product_Name": "პროდუქტი",
+                    "Current_Stock": "ნაშთი",
+                    "Cost_Price": "თვითღირებულება",
+                    "Selling_Price": "გასაყიდი ფასი",
+                }
+            )
+            st.dataframe(overview_display, use_container_width=True)
         else:
             st.info("პროდუქტები არ არის დამატებული.")
