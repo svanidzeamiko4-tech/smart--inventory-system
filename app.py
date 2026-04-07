@@ -55,6 +55,37 @@ def load_data():
     return pd.DataFrame()
 
 
+def safe_write_csv(df, file_path):
+    try:
+        temp_path = f"{file_path}.tmp"
+        df.to_csv(temp_path, index=False)
+        os.replace(temp_path, file_path)
+        return True
+    except Exception:
+        return False
+
+
+def safe_append_row(file_path, row, columns):
+    try:
+        if os.path.exists(file_path):
+            existing = pd.read_csv(file_path)
+        else:
+            existing = pd.DataFrame(columns=columns)
+        updated = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
+        return safe_write_csv(updated, file_path)
+    except Exception:
+        return False
+
+
+# Data Controller layer (CSV today, DB tomorrow)
+def get_products():
+    return load_data()
+
+
+def save_products(df):
+    return save_data(df)
+
+
 def hash_password(raw_password):
     return hashlib.sha256(raw_password.encode("utf-8")).hexdigest()
 
@@ -322,11 +353,10 @@ def append_delivery_log(username, company, store, product, qty, unit_price, deli
         "unit_price": float(unit_price),
         "total_sales": float(qty) * float(unit_price),
     }
-    pd.DataFrame([row]).to_csv(
+    safe_append_row(
         DELIVERY_LOG_FILE,
-        mode="a",
-        header=not os.path.exists(DELIVERY_LOG_FILE) or os.path.getsize(DELIVERY_LOG_FILE) == 0,
-        index=False,
+        row,
+        ["id", "timestamp", "date", "username", "company", "store", "product", "qty", "unit_price", "total_sales"],
     )
 
 
@@ -344,11 +374,10 @@ def append_pending_delivery(username, company, store, product, ordered_qty, unit
         "unit_price": float(unit_price),
         "status": "pending",
     }
-    pd.DataFrame([row]).to_csv(
+    safe_append_row(
         PENDING_DELIVERY_FILE,
-        mode="a",
-        header=not os.path.exists(PENDING_DELIVERY_FILE) or os.path.getsize(PENDING_DELIVERY_FILE) == 0,
-        index=False,
+        row,
+        ["id", "timestamp", "date", "username", "company", "store", "product", "ordered_qty", "unit_price", "status"],
     )
 
 
@@ -365,7 +394,7 @@ def load_pending_deliveries():
 
 
 def save_pending_deliveries(pdf):
-    pdf.to_csv(PENDING_DELIVERY_FILE, index=False)
+    safe_write_csv(pdf, PENDING_DELIVERY_FILE)
 
 
 def append_discrepancy_log(distributor, company, store, product, ordered_qty, confirmed_qty, reason, corrected_by=""):
@@ -382,11 +411,10 @@ def append_discrepancy_log(distributor, company, store, product, ordered_qty, co
         "reason": str(reason),
         "corrected_by": str(corrected_by),
     }
-    pd.DataFrame([row]).to_csv(
+    safe_append_row(
         DISCREPANCY_LOG_FILE,
-        mode="a",
-        header=not os.path.exists(DISCREPANCY_LOG_FILE) or os.path.getsize(DISCREPANCY_LOG_FILE) == 0,
-        index=False,
+        row,
+        ["timestamp", "distributor", "company", "store", "product", "ordered_qty", "confirmed_qty", "difference", "reason", "corrected_by"],
     )
 
 
@@ -420,7 +448,7 @@ def load_delivery_log():
 
 
 def save_delivery_log(ddf):
-    ddf.to_csv(DELIVERY_LOG_FILE, index=False)
+    safe_write_csv(ddf, DELIVERY_LOG_FILE)
 
 
 def append_correction_log(delivery_id, distributor, company, store, product, original_qty, updated_qty, reason, updated_by):
@@ -437,11 +465,10 @@ def append_correction_log(delivery_id, distributor, company, store, product, ori
         "reason": str(reason),
         "updated_by": str(updated_by),
     }
-    pd.DataFrame([row]).to_csv(
+    safe_append_row(
         CORRECTION_LOG_FILE,
-        mode="a",
-        header=not os.path.exists(CORRECTION_LOG_FILE) or os.path.getsize(CORRECTION_LOG_FILE) == 0,
-        index=False,
+        row,
+        ["timestamp", "delivery_id", "distributor", "company", "store", "product", "original_qty", "updated_qty", "difference", "reason", "updated_by"],
     )
 
 
@@ -473,11 +500,10 @@ def append_adjustment_request(delivery_id, store_manager, distributor, company, 
         "status": "pending",
         "reviewed_by": "",
     }
-    pd.DataFrame([row]).to_csv(
+    safe_append_row(
         ADJUSTMENT_REQUEST_FILE,
-        mode="a",
-        header=not os.path.exists(ADJUSTMENT_REQUEST_FILE) or os.path.getsize(ADJUSTMENT_REQUEST_FILE) == 0,
-        index=False,
+        row,
+        ["request_id", "timestamp", "delivery_id", "store_manager", "distributor", "company", "store", "product", "current_qty", "requested_qty", "reason", "status", "reviewed_by"],
     )
 
 
@@ -495,7 +521,7 @@ def load_adjustment_requests():
 
 
 def save_adjustment_requests(rdf):
-    rdf.to_csv(ADJUSTMENT_REQUEST_FILE, index=False)
+    safe_write_csv(rdf, ADJUSTMENT_REQUEST_FILE)
 
 
 def update_adjustment_request_status(request_id, status, reviewed_by):
@@ -604,7 +630,7 @@ def load_users():
             ]
         )
         users_df = pd.concat([users_df, admin_row], ignore_index=True)
-        users_df.to_csv(USERS_FILE, index=False)
+        safe_write_csv(users_df, USERS_FILE)
 
     users = users_df.to_dict("records")
     for user in users:
@@ -695,7 +721,7 @@ def apply_role_filters(df, sales_df, auth_user, mapping_data):
 
 
 def save_users(users):
-    pd.DataFrame(users).to_csv(USERS_FILE, index=False)
+    safe_write_csv(pd.DataFrame(users), USERS_FILE)
 
 
 def get_role_scope(auth_user, mapping_data):
@@ -772,7 +798,7 @@ def get_default_page_for_role(role):
 
 
 def save_data(df):
-    df.to_csv(FILE_NAME, index=False)
+    return safe_write_csv(df, FILE_NAME)
 
 
 def append_audit_log(store, product, old_stock, new_stock, difference, reason, cost_price):
@@ -786,9 +812,11 @@ def append_audit_log(store, product, old_stock, new_stock, difference, reason, c
         "Reason": str(reason),
         "Cost Price": float(cost_price)
     }
-    log_df = pd.DataFrame([log_row])
-    write_header = not os.path.exists(AUDIT_LOG_FILE)
-    log_df.to_csv(AUDIT_LOG_FILE, mode="a", header=write_header, index=False)
+    safe_append_row(
+        AUDIT_LOG_FILE,
+        log_row,
+        ["Date", "Store", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Cost Price"],
+    )
 
 
 def load_audit_log():
@@ -820,9 +848,22 @@ def append_sales_log(sale_date, store, product, qty, selling_price, cost_price):
         "Revenue": revenue,
         "Profit": profit,
     }
-    log_df = pd.DataFrame([log_row])
-    write_header = not os.path.exists(SALES_LOG_FILE)
-    log_df.to_csv(SALES_LOG_FILE, mode="a", header=write_header, index=False)
+    safe_append_row(
+        SALES_LOG_FILE,
+        log_row,
+        ["Timestamp", "Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"],
+    )
+
+
+def save_sale(sale_date, store, product, qty, selling_price, cost_price):
+    append_sales_log(
+        sale_date=sale_date,
+        store=store,
+        product=product,
+        qty=qty,
+        selling_price=selling_price,
+        cost_price=cost_price,
+    )
 
 
 def load_sales_log():
@@ -847,7 +888,7 @@ def load_sales_log():
         original_store = sales_df["Store"].astype(str)
         sales_df["Store"] = original_store.replace(STORE_NAME_MAP)
         if not sales_df["Store"].astype(str).equals(original_store):
-            sales_df.to_csv(SALES_LOG_FILE, index=False)
+            safe_write_csv(sales_df, SALES_LOG_FILE)
 
         for numeric_col in ["Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"]:
             sales_df[numeric_col] = pd.to_numeric(sales_df[numeric_col], errors="coerce").fillna(0)
@@ -936,7 +977,7 @@ def generate_month_sales_simulation(current_df, transactions=10000):
             }
         )
     simulated_sales_df = pd.DataFrame(sales_rows)
-    simulated_sales_df.to_csv(SALES_LOG_FILE, index=False)
+    safe_write_csv(simulated_sales_df, SALES_LOG_FILE)
 
     inventory_df = pd.DataFrame(inventory_rows)
     sold_by_item = simulated_sales_df.groupby(["Store", "Product"], as_index=False)["Qty"].sum().rename(
@@ -1082,7 +1123,7 @@ def recalc_metrics(df):
     return df
 
 if 'df' not in st.session_state:
-    st.session_state.df = load_data()
+    st.session_state.df = get_products()
 
 if "auth_user" not in st.session_state:
     st.session_state.auth_user = None
@@ -1235,7 +1276,7 @@ if page == "🏢 კომპანიის მართვა":
                 [map_df, pd.DataFrame([{"mapping_type": "distributor_store", "key": selected_user, "value": selected_branch}])],
                 ignore_index=True,
             )
-            map_df.to_csv(MAPPING_FILE, index=False)
+            safe_write_csv(map_df, MAPPING_FILE)
         st.success(f"{selected_user} მიბმულია ფილიალზე: {selected_branch}")
         st.rerun()
 
@@ -1569,7 +1610,7 @@ elif page == "🛒 გაყიდვები":
                 full_df = recalc_metrics(full_df)
                 save_data(full_df)
                 st.session_state.df = full_df
-                append_sales_log(
+                save_sale(
                     sale_date=datetime.now(),
                     store=row.get("Store_Name", ""),
                     product=row.get("Product_Name", ""),
@@ -1847,7 +1888,7 @@ elif page == "📦 პროდუქციის სია":
                 continue
             unit_profit = float(row.get("Selling_Price", 0)) - float(row.get("Cost_Price", 0))
             st.session_state.daily_profit += unit_profit * sell_qty
-            append_sales_log(
+            save_sale(
                 sale_date=datetime.now(),
                 store=row.get("Store_Name", ""),
                 product=row.get("Product_Name", ""),
@@ -2062,7 +2103,7 @@ elif page == "🤝 დისტრიბუტორების მართვ
             map_rows = [{"mapping_type": "user_company", "key": new_username.strip(), "value": new_company}]
             map_rows += [{"mapping_type": "distributor_store", "key": new_username.strip(), "value": s} for s in assign_stores]
             map_df = pd.concat([map_df, pd.DataFrame(map_rows)], ignore_index=True)
-            map_df.to_csv(MAPPING_FILE, index=False)
+            safe_write_csv(map_df, MAPPING_FILE)
             st.success("Distributor ანგარიში წარმატებით შეიქმნა.")
             st.rerun()
 
