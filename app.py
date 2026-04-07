@@ -3,6 +3,7 @@ import streamlit as st
 from datetime import datetime, timedelta
 import os
 import random
+import math
 
 st.set_page_config(page_title="ERP Smart System", layout="wide")
 FILE_NAME = "Product.csv.txt"
@@ -196,6 +197,27 @@ def generate_month_sales_simulation(current_df, transactions=10000):
     return inventory_df
 
 
+def get_low_stock_alerts(df, threshold=5):
+    if df.empty:
+        return pd.DataFrame()
+    return df[df["Current_Stock"] < threshold].copy()
+
+
+def get_weekly_demand_stats(sales_df, product_name, store_name):
+    if sales_df.empty:
+        return 0.0, 0
+    last_7_days = datetime.now() - timedelta(days=7)
+    product_sales = sales_df[
+        (sales_df["Timestamp"] >= last_7_days)
+        & (sales_df["Product"].astype(str) == str(product_name))
+        & (sales_df["Store"].astype(str) == str(store_name))
+    ]
+    total_qty_7d = int(product_sales["Qty"].sum()) if not product_sales.empty else 0
+    avg_daily_qty = total_qty_7d / 7
+    recommended_qty = int(math.ceil(avg_daily_qty * 7))
+    return avg_daily_qty, recommended_qty
+
+
 def recalc_metrics(df):
     required_base_cols = ["Store_Name", "Product_Name", "Current_Stock", "Cost_Price", "Selling_Price", "Expiry_Date"]
     for col in required_base_cols:
@@ -249,16 +271,20 @@ df["დღე ვადის გასვლამდე"] = (pd.to_datetime(df
 
 # --- მთავარი გვერდითა მენიუ ---
 st.sidebar.title("🎛️ მართვის პანელი")
+pages = [
+    "🏠 მთავარი პანელი",
+    "📦 პროდუქციის სია",
+    "📥 საქონლის მიღება",
+    "🔍 ინვენტარიზაცია",
+    "📈 დეტალური ანალიტიკა",
+    "📊 ანგარიშები",
+]
+if "page_nav" not in st.session_state or st.session_state.page_nav not in pages:
+    st.session_state.page_nav = pages[0]
 page = st.sidebar.radio(
     "გადადი გვერდზე:",
-    [
-        "🏠 მთავარი პანელი",
-        "📦 პროდუქციის სია",
-        "📥 საქონლის მიღება",
-        "🔍 ინვენტარიზაცია",
-        "📈 დეტალური ანალიტიკა",
-        "📊 ანგარიშები",
-    ]
+    pages,
+    key="page_nav",
 )
 
 st.sidebar.markdown("---")
@@ -304,6 +330,30 @@ if page == "🏠 მთავარი პანელი":
     c2.metric("📉 დაბალი ნაშთის გაფრთხილება", len(df[df["დარჩენილი დღე"] < 3]))
     c3.metric("⚠️ ვადის გაფრთხილება", len(expiring_soon))
     c4.metric("💰 დღიური მოგება", f"{st.session_state.daily_profit:.2f}")
+
+    st.divider()
+    st.subheader("გასათვალისწინებელი შეტყობინებები")
+    sales_df = load_sales_log()
+    low_stock_alerts = get_low_stock_alerts(df, threshold=5)
+    if low_stock_alerts.empty:
+        st.success("კრიტიკული დაბალი ნაშთის პროდუქტები არ არის.")
+    else:
+        for idx, row in low_stock_alerts.iterrows():
+            store_name = str(row["Store_Name"])
+            product_name = str(row["Product_Name"])
+            current_stock = int(row["Current_Stock"])
+            st.warning(f"{store_name}: {product_name} იწურება! (ნაშთი: {current_stock})")
+            with st.expander("რეკომენდაცია"):
+                avg_daily_qty, recommended_qty = get_weekly_demand_stats(sales_df, product_name, store_name)
+                st.info(
+                    f"ამ პროდუქტზე კვირაში საშუალოდ {avg_daily_qty:.1f} მოთხოვნაა. "
+                    f"გირჩევთ, დაამატოთ მინიმუმ {recommended_qty} ერთეული 1 კვირის მარაგისთვის."
+                )
+                if st.button("გადასვლა", key=f"goto_add_stock_{idx}"):
+                    st.session_state.page_nav = "📥 საქონლის მიღება"
+                    st.session_state.prefill_product = product_name
+                    st.session_state.prefill_store = store_name
+                    st.rerun()
 
 elif page == "📦 პროდუქციის სია":
     st.title("📦 პროდუქციის სია")
@@ -365,10 +415,20 @@ elif page == "📥 საქონლის მიღება":
         st.markdown("### 🧾 ზედნადების შევსება")
         st.markdown("შეავსე ზედნადების ინფორმაცია და შეინახე პროდუქტის ჩანაწერი.")
 
+    store_options = df["Store_Name"].unique() if not df.empty else ["Gldani_Branch"]
+    prefill_product = st.session_state.pop("prefill_product", "")
+    prefill_store = st.session_state.pop("prefill_store", "")
+    if prefill_product:
+        st.session_state["add_stock_product"] = prefill_product
+    if prefill_store and prefill_store in store_options:
+        st.session_state["add_stock_store"] = prefill_store
+    elif "add_stock_store" not in st.session_state:
+        st.session_state["add_stock_store"] = store_options[0]
+
     with st.form("manual_add"):
         col1, col2 = st.columns(2, gap="large")
-        f_store = col1.selectbox("მაღაზია", df["Store_Name"].unique() if not df.empty else ["Gldani_Branch"])
-        f_name = col2.text_input("პროდუქტი")
+        f_store = col1.selectbox("მაღაზია", store_options, key="add_stock_store")
+        f_name = col2.text_input("პროდუქტი", key="add_stock_product")
         f_qty = col1.number_input("რაოდენობა", min_value=1)
         f_cost_price = col1.number_input("თვითღირებულება", min_value=0.0, format="%.2f")
         f_selling_price = col2.number_input("გასაყიდი ფასი", min_value=0.0, format="%.2f")
@@ -396,6 +456,7 @@ elif page == "📥 საქონლის მიღება":
         df = recalc_metrics(df)
         save_data(df)
         st.session_state.df = df
+        st.session_state["add_stock_product"] = ""
         st.success("პროდუქტი შენახულია")
         st.experimental_rerun()
 
