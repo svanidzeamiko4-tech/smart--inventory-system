@@ -5,12 +5,13 @@ import os
 import random
 import math
 import json
+import hashlib
 
 st.set_page_config(page_title="ERP Smart System", layout="wide")
 FILE_NAME = "Product.csv.txt"
 AUDIT_LOG_FILE = "audit_log.csv"
 SALES_LOG_FILE = "sales_log.csv"
-USERS_FILE = "auth_users.json"
+USERS_FILE = "users.csv"
 DISTRIBUTOR_MAP_FILE = "distributor_mapping.json"
 STORE_NAME_MAP = {
     "Gldani_Branch": "გლდანის ფილიალი",
@@ -47,15 +48,53 @@ def load_data():
     return pd.DataFrame()
 
 
+def hash_password(raw_password):
+    return hashlib.sha256(raw_password.encode("utf-8")).hexdigest()
+
+
 def ensure_auth_files():
     if not os.path.exists(USERS_FILE):
-        default_users = [
-            {"username": "admin", "password": "admin123", "role": "Admin"},
-            {"username": "manager_gldani", "password": "manager123", "role": "Store_Manager", "store": "გლდანის ფილიალი"},
-            {"username": "distributor_a", "password": "dist123", "role": "Distributor", "company": "Supplier_A"},
-        ]
-        with open(USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(default_users, f, ensure_ascii=False, indent=2)
+        default_users_df = pd.DataFrame(
+            [
+                {
+                    "username": "super_admin",
+                    "password_hash": hash_password("admin123"),
+                    "role": "Super_Admin",
+                    "company": "Global",
+                    "store": "",
+                    "allowed_stores": "",
+                    "allowed_products": "",
+                },
+                {
+                    "username": "manager_gldani",
+                    "password_hash": hash_password("manager123"),
+                    "role": "Store_Manager",
+                    "company": "Ifkli",
+                    "store": "გლდანის ფილიალი",
+                    "allowed_stores": "გლდანის ფილიალი",
+                    "allowed_products": "",
+                },
+                {
+                    "username": "ifkli_admin",
+                    "password_hash": hash_password("ifkli123"),
+                    "role": "Company_Admin",
+                    "company": "Ifkli",
+                    "store": "",
+                    "allowed_stores": "გლდანის ფილიალი|ვაკის ფილიალი",
+                    "allowed_products": "Apple|Banana|Milk|Bread|Rice",
+                },
+                {
+                    "username": "distributor_a",
+                    "password_hash": hash_password("dist123"),
+                    "role": "Distributor",
+                    "company": "Ifkli",
+                    "store": "",
+                    "allowed_stores": "გლდანის ფილიალი|ვაკის ფილიალი",
+                    "allowed_products": "Apple|Banana|Milk|Bread|Rice",
+                },
+            ]
+        )
+        default_users_df.to_csv(USERS_FILE, index=False)
 
     if not os.path.exists(DISTRIBUTOR_MAP_FILE):
         default_map = {
@@ -71,8 +110,13 @@ def ensure_auth_files():
 
 def load_users():
     ensure_auth_files()
-    with open(USERS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    users_df = pd.read_csv(USERS_FILE, dtype=str).fillna("")
+    users = users_df.to_dict("records")
+    for user in users:
+        # Backward compatibility if old Admin role exists
+        if user.get("role") == "Admin":
+            user["role"] = "Super_Admin"
+    return users
 
 
 def load_distributor_map():
@@ -84,7 +128,7 @@ def load_distributor_map():
 def authenticate_user(username, password):
     users = load_users()
     for user in users:
-        if user.get("username") == username and user.get("password") == password:
+        if user.get("username") == username and user.get("password_hash") == hash_password(password):
             return user
     return None
 
@@ -94,7 +138,7 @@ def apply_role_filters(df, sales_df, auth_user, distributor_map):
     filtered_df = df.copy()
     filtered_sales = sales_df.copy()
 
-    if role == "Admin":
+    if role == "Super_Admin":
         return filtered_df, filtered_sales
 
     if role == "Store_Manager":
@@ -105,9 +149,8 @@ def apply_role_filters(df, sales_df, auth_user, distributor_map):
         return filtered_df, filtered_sales
 
     if role == "Distributor":
-        rule = distributor_map.get(auth_user.get("username", ""), {})
-        allowed_stores = set(rule.get("stores", []))
-        allowed_products = set(rule.get("products", []))
+        allowed_stores = set([x for x in str(auth_user.get("allowed_stores", "")).split("|") if x])
+        allowed_products = set([x for x in str(auth_user.get("allowed_products", "")).split("|") if x])
         filtered_df = filtered_df[
             filtered_df["Store_Name"].astype(str).isin(allowed_stores)
             & filtered_df["Product_Name"].astype(str).isin(allowed_products)
@@ -119,7 +162,24 @@ def apply_role_filters(df, sales_df, auth_user, distributor_map):
             ]
         return filtered_df, filtered_sales
 
+    if role == "Company_Admin":
+        allowed_stores = set([x for x in str(auth_user.get("allowed_stores", "")).split("|") if x])
+        allowed_products = set([x for x in str(auth_user.get("allowed_products", "")).split("|") if x])
+        if allowed_stores:
+            filtered_df = filtered_df[filtered_df["Store_Name"].astype(str).isin(allowed_stores)]
+            if not filtered_sales.empty:
+                filtered_sales = filtered_sales[filtered_sales["Store"].astype(str).isin(allowed_stores)]
+        if allowed_products:
+            filtered_df = filtered_df[filtered_df["Product_Name"].astype(str).isin(allowed_products)]
+            if not filtered_sales.empty:
+                filtered_sales = filtered_sales[filtered_sales["Product"].astype(str).isin(allowed_products)]
+        return filtered_df, filtered_sales
+
     return filtered_df.iloc[0:0], filtered_sales.iloc[0:0]
+
+
+def save_users(users):
+    pd.DataFrame(users).to_csv(USERS_FILE, index=False)
 
 
 def save_data(df):
@@ -469,9 +529,8 @@ st.session_state.df = recalc_metrics(st.session_state.df)
 
 auth_user = st.session_state.auth_user
 sales_df_all = load_sales_log()
-distributor_map = load_distributor_map()
 master_df = st.session_state.df
-df, sales_df_all = apply_role_filters(master_df, sales_df_all, auth_user, distributor_map)
+df, sales_df_all = apply_role_filters(master_df, sales_df_all, auth_user, {})
 
 # 2. ანალიტიკური გათვლები
 sales_cols = [f"Sales_Day{i}" for i in range(1, 8)]
@@ -498,7 +557,9 @@ pages = [
     "🔍 ინვენტარიზაცია",
     "📊 ანგარიშები",
 ]
-if auth_user.get("role") == "Admin":
+if auth_user.get("role") in ["Super_Admin", "Company_Admin"]:
+    pages.insert(4, "👥 მომხმარებლების მართვა")
+if auth_user.get("role") == "Super_Admin":
     pages.insert(4, "📈 დეტალური ანალიტიკა")
 # Stable navigation: keep radio state separate from programmatic redirects.
 if "current_page" not in st.session_state or st.session_state.current_page not in pages:
@@ -514,7 +575,7 @@ page = st.sidebar.radio(
 )
 st.session_state.current_page = page
 
-if auth_user.get("role") == "Admin":
+if auth_user.get("role") == "Super_Admin":
     st.sidebar.markdown("---")
     st.sidebar.subheader("🚀 საჩვენებელი რეჟიმი")
     if st.sidebar.button("10,000 გაყიდვის გენერირება (სიმულაცია)", use_container_width=True):
@@ -804,6 +865,73 @@ elif page == "🔍 ინვენტარიზაცია":
                 append_audit_log(product_name, old_stock, updated_stock, difference, reason, cost_price)
                 st.success("ინვენტარის ცვლილება შენახულია და აუდიტის ჟურნალი განახლდა.")
                 st.rerun()
+
+elif page == "👥 მომხმარებლების მართვა":
+    st.title("👥 მომხმარებლების მართვა")
+    st.caption("Company Admin ქმნის Distributor ანგარიშებს საკუთარი კომპანიისთვის.")
+
+    users = load_users()
+    my_role = auth_user.get("role", "")
+    my_company = auth_user.get("company", "")
+
+    if my_role == "Super_Admin":
+        visible_users = users
+    else:
+        visible_users = [u for u in users if str(u.get("company", "")) == str(my_company)]
+
+    users_display = pd.DataFrame(visible_users)[["username", "role", "company", "store", "allowed_stores", "allowed_products"]]
+    users_display = users_display.rename(
+        columns={
+            "username": "მომხმარებელი",
+            "role": "როლი",
+            "company": "კომპანია",
+            "store": "ფილიალი",
+            "allowed_stores": "ნებადართული ფილიალები",
+            "allowed_products": "ნებადართული პროდუქტები",
+        }
+    )
+    st.dataframe(users_display, use_container_width=True)
+
+    st.divider()
+    st.subheader("ახალი Distributor ანგარიშის შექმნა")
+    available_stores = sorted(master_df["Store_Name"].astype(str).unique().tolist()) if not master_df.empty else []
+    available_products = sorted(master_df["Product_Name"].astype(str).unique().tolist()) if not master_df.empty else []
+
+    with st.form("create_distributor_form"):
+        new_username = st.text_input("მომხმარებლის სახელი")
+        new_password = st.text_input("პაროლი", type="password")
+
+        if my_role == "Super_Admin":
+            company_options = sorted(pd.DataFrame(users)["company"].replace("", pd.NA).dropna().unique().tolist())
+            company_options = company_options if company_options else ["Ifkli"]
+            new_company = st.selectbox("კომპანია", company_options)
+        else:
+            new_company = my_company
+            st.info(f"კომპანია: {new_company}")
+
+        assign_stores = st.multiselect("მისაწვდომი ფილიალები", options=available_stores)
+        assign_products = st.multiselect("მისაწვდომი პროდუქტები", options=available_products)
+        create_submitted = st.form_submit_button("Distributor ანგარიშის შექმნა")
+
+    if create_submitted:
+        if not new_username.strip() or not new_password.strip():
+            st.error("შეავსე მომხმარებლის სახელი და პაროლი.")
+        elif any(u.get("username") == new_username.strip() for u in users):
+            st.error("ასეთი მომხმარებელი უკვე არსებობს.")
+        else:
+            new_user = {
+                "username": new_username.strip(),
+                "password_hash": hash_password(new_password.strip()),
+                "role": "Distributor",
+                "company": new_company,
+                "store": "",
+                "allowed_stores": "|".join(assign_stores),
+                "allowed_products": "|".join(assign_products),
+            }
+            users.append(new_user)
+            save_users(users)
+            st.success("Distributor ანგარიში წარმატებით შეიქმნა.")
+            st.rerun()
 
 elif page == "📈 დეტალური ანალიტიკა":
     st.title("📈 დეტალური ანალიტიკა")
