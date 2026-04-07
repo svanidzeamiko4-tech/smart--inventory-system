@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
 import os
+import random
 
 st.set_page_config(page_title="ERP Smart System", layout="wide")
 FILE_NAME = "Product.csv.txt"
@@ -111,6 +112,82 @@ def load_sales_log():
             sales_df[numeric_col] = pd.to_numeric(sales_df[numeric_col], errors="coerce").fillna(0)
         return sales_df.dropna(subset=["Timestamp"])
     return pd.DataFrame(columns=["Timestamp", "Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"])
+
+
+def generate_month_sales_simulation(current_df, transactions=10000):
+    stores = ["Gldani_Branch", "Vake_Branch", "Saburtalo_Branch", "Didube_Branch"]
+    products = [
+        ("Apple", 1.20, 2.10),
+        ("Banana", 0.80, 1.60),
+        ("Milk", 1.10, 1.95),
+        ("Bread", 0.70, 1.30),
+        ("Rice", 1.50, 2.40),
+        ("Pasta", 1.00, 1.90),
+        ("Cheese", 2.20, 3.80),
+        ("Yogurt", 0.90, 1.70),
+        ("Eggs", 1.60, 2.70),
+        ("Chicken", 3.20, 4.90),
+        ("Beef", 4.20, 6.20),
+        ("Potato", 0.50, 1.10),
+        ("Tomato", 0.90, 1.80),
+        ("Onion", 0.40, 0.95),
+        ("Orange Juice", 1.70, 2.90),
+    ]
+
+    expiry_base = datetime.now() + timedelta(days=45)
+    inventory_rows = []
+    for store in stores:
+        for product_name, cost_price, selling_price in products:
+            inventory_rows.append(
+                {
+                    "Store_Name": store,
+                    "Product_Name": product_name,
+                    "Current_Stock": 1200,
+                    "Cost_Price": cost_price,
+                    "Selling_Price": selling_price,
+                    "Price": selling_price,
+                    "Sales_Day1": 0,
+                    "Sales_Day2": 0,
+                    "Sales_Day3": 0,
+                    "Sales_Day4": 0,
+                    "Sales_Day5": 0,
+                    "Sales_Day6": 0,
+                    "Sales_Day7": 0,
+                    "Expiry_Date": pd.to_datetime(expiry_base),
+                }
+            )
+    inventory_df = pd.DataFrame(inventory_rows)
+    inventory_df = ensure_data_structure(inventory_df)
+    inventory_df = recalc_metrics(inventory_df)
+    save_data(inventory_df)
+
+    now = datetime.now()
+    start_dt = now - timedelta(days=30)
+    sales_rows = []
+    for _ in range(transactions):
+        store = random.choice(stores)
+        product_name, cost_price, selling_price = random.choice(products)
+        qty = random.randint(1, 3)
+        seconds_offset = random.randint(0, int((now - start_dt).total_seconds()))
+        sale_ts = start_dt + timedelta(seconds=seconds_offset)
+        revenue = qty * selling_price
+        profit = qty * (selling_price - cost_price)
+        sales_rows.append(
+            {
+                "Timestamp": sale_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "Date": sale_ts.strftime("%Y-%m-%d"),
+                "Store": store,
+                "Product": product_name,
+                "Qty": qty,
+                "Selling_Price": selling_price,
+                "Cost_Price": cost_price,
+                "Revenue": revenue,
+                "Profit": profit,
+            }
+        )
+    simulated_sales_df = pd.DataFrame(sales_rows)
+    simulated_sales_df.to_csv(SALES_LOG_FILE, index=False)
+    return inventory_df
 
 
 def recalc_metrics(df):
@@ -333,6 +410,14 @@ elif page == "🔍 Stock Audit (აღწერა)":
 elif page == "📈 Detailed Analytics":
     st.title("📈 Detailed Analytics")
     st.caption("Analyze revenue, profit, and sales volume by period and branch.")
+
+    if st.button("Generate 1-Month Simulation (10,000 Sales)"):
+        st.session_state.df = generate_month_sales_simulation(st.session_state.df, transactions=10000)
+        st.session_state.daily_profit = 0.0
+        st.success("Simulation complete: 10,000 sales generated over the last 30 days.")
+        st.rerun()
+
+    df = st.session_state.df
     sales_df = load_sales_log()
 
     if "analytics_start" not in st.session_state:
@@ -392,9 +477,15 @@ elif page == "📈 Detailed Analytics":
             daily_sales = daily_sales.rename(columns={"DateOnly": "Date"})
             st.line_chart(daily_sales.set_index("Date")["Revenue"])
 
-            st.subheader("Sales by Store")
-            sales_by_store = filtered_sales.groupby("Store", as_index=False)["Revenue"].sum()
-            st.bar_chart(sales_by_store.set_index("Store")["Revenue"])
+            c_chart1, c_chart2 = st.columns(2)
+            with c_chart1:
+                st.subheader("Sales by Store")
+                sales_by_store = filtered_sales.groupby("Store", as_index=False)["Revenue"].sum()
+                st.bar_chart(sales_by_store.set_index("Store")["Revenue"])
+            with c_chart2:
+                st.subheader("Profit by Branch")
+                profit_by_store = filtered_sales.groupby("Store", as_index=False)["Profit"].sum()
+                st.bar_chart(profit_by_store.set_index("Store")["Profit"])
 
 elif page == "📊 Reports":
     st.title("📊 Reports")
