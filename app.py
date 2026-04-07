@@ -163,20 +163,23 @@ def generate_month_sales_simulation(current_df, transactions=10000):
                     "Expiry_Date": pd.to_datetime(expiry_base),
                 }
             )
-    inventory_df = pd.DataFrame(inventory_rows)
-    inventory_df = ensure_data_structure(inventory_df)
-    inventory_df = recalc_metrics(inventory_df)
-    save_data(inventory_df)
-
     now = datetime.now()
-    start_dt = now - timedelta(days=30)
+    peak_days = {
+        (now.date() - timedelta(days=random.randint(1, 28))).isoformat()
+        for _ in range(3)
+    }
+    weighted_days = []
+    for i in range(30):
+        day = (now.date() - timedelta(days=i)).isoformat()
+        weight = 10 if day in peak_days else 1
+        weighted_days.extend([day] * weight)
     sales_rows = []
     for _ in range(transactions):
         store = random.choice(stores)
         product_name, cost_price, selling_price = random.choice(products)
         qty = random.randint(1, 3)
-        seconds_offset = random.randint(0, int((now - start_dt).total_seconds()))
-        sale_ts = start_dt + timedelta(seconds=seconds_offset)
+        random_day = datetime.fromisoformat(random.choice(weighted_days))
+        sale_ts = datetime.combine(random_day.date(), datetime.min.time()) + timedelta(seconds=random.randint(0, 86399))
         revenue = qty * selling_price
         profit = qty * (selling_price - cost_price)
         sales_rows.append(
@@ -194,6 +197,31 @@ def generate_month_sales_simulation(current_df, transactions=10000):
         )
     simulated_sales_df = pd.DataFrame(sales_rows)
     simulated_sales_df.to_csv(SALES_LOG_FILE, index=False)
+
+    inventory_df = pd.DataFrame(inventory_rows)
+    sold_by_item = simulated_sales_df.groupby(["Store", "Product"], as_index=False)["Qty"].sum().rename(
+        columns={"Store": "Store_Name", "Product": "Product_Name", "Qty": "Sold_Qty"}
+    )
+    inventory_df = inventory_df.merge(sold_by_item, on=["Store_Name", "Product_Name"], how="left")
+    inventory_df["Sold_Qty"] = inventory_df["Sold_Qty"].fillna(0)
+    inventory_df["Current_Stock"] = (1200 - inventory_df["Sold_Qty"]).clip(lower=0).astype(int)
+    inventory_df = inventory_df.drop(columns=["Sold_Qty"])
+
+    # Stress Test: distribution delays on 3-4 products.
+    disrupted_products = random.sample([p[0] for p in products], k=random.randint(3, 4))
+    delay_mask = inventory_df["Product_Name"].isin(disrupted_products)
+    inventory_df.loc[delay_mask, "Current_Stock"] = [random.choice([0, 1, 2]) for _ in range(delay_mask.sum())]
+
+    # Stress Test: deliberate discrepancies between stock and sales history.
+    discrepancy_indexes = random.sample(inventory_df.index.tolist(), k=min(10, len(inventory_df)))
+    for idx in discrepancy_indexes:
+        inventory_df.at[idx, "Current_Stock"] = max(
+            0, int(inventory_df.at[idx, "Current_Stock"]) + random.choice([-80, -50, 40, 70])
+        )
+
+    inventory_df = ensure_data_structure(inventory_df)
+    inventory_df = recalc_metrics(inventory_df)
+    save_data(inventory_df)
     return inventory_df
 
 
@@ -275,6 +303,21 @@ def get_branches_with_no_sales_last_3h(sales_df, df):
     return [store for store in all_stores if store not in recent_stores]
 
 
+def detect_stock_discrepancy(df, sales_df, baseline_stock=1200, tolerance=15):
+    if df.empty or sales_df.empty:
+        return False
+    sold = sales_df.groupby(["Store", "Product"], as_index=False)["Qty"].sum().rename(
+        columns={"Store": "Store_Name", "Product": "Product_Name", "Qty": "Sold_Qty"}
+    )
+    merged = df[["Store_Name", "Product_Name", "Current_Stock"]].merge(
+        sold, on=["Store_Name", "Product_Name"], how="left"
+    )
+    merged["Sold_Qty"] = merged["Sold_Qty"].fillna(0)
+    merged["Expected_Stock"] = (baseline_stock - merged["Sold_Qty"]).clip(lower=0)
+    merged["Delta"] = (merged["Current_Stock"] - merged["Expected_Stock"]).abs()
+    return bool((merged["Delta"] > tolerance).any())
+
+
 def recalc_metrics(df):
     required_base_cols = ["Store_Name", "Product_Name", "Current_Stock", "Cost_Price", "Selling_Price", "Expiry_Date"]
     for col in required_base_cols:
@@ -348,12 +391,14 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("🚀 საჩვენებელი რეჟიმი")
 if st.sidebar.button("10,000 გაყიდვის გენერირება (სიმულაცია)", use_container_width=True):
     st.session_state.df = generate_month_sales_simulation(st.session_state.df, transactions=10000)
+    st.session_state.simulation_stress_mode = True
     st.session_state.daily_profit = 0.0
     st.session_state.profit_date = datetime.now().strftime("%Y-%m-%d")
     st.rerun()
 
 if st.sidebar.button("🗑️ სისტემის გასუფთავება", use_container_width=True):
     reset_system_data()
+    st.session_state.simulation_stress_mode = False
     st.session_state.df = pd.DataFrame()
     st.session_state.daily_profit = 0.0
     st.session_state.profit_date = datetime.now().strftime("%Y-%m-%d")
@@ -402,6 +447,9 @@ if page == "🏠 მთავარი პანელი":
             current_stock = int(row["Current_Stock"])
             daily_actions.append(f"[მაღალი] შეამოწმე ნაშთი: {store_name} - {product_name}")
             st.warning(f"{store_name}: {product_name} იწურება! (ნაშთი: {current_stock})")
+            if current_stock <= 2:
+                st.warning(f"{product_name} კრიტიკულად ცოტაა! დისტრიბუტორმა დაიგვიანა. სასწრაფოდ შეუკვეთეთ.")
+                daily_actions.append(f"[უმაღლესი] {product_name} კრიტიკულად ცოტაა! დისტრიბუტორმა დაიგვიანა. სასწრაფოდ შეუკვეთეთ.")
             with st.expander("რეკომენდაცია"):
                 avg_daily_qty, recommended_qty = get_restock_recommendation_qty(
                     sales_df, product_name, store_name, current_stock
@@ -418,6 +466,10 @@ if page == "🏠 მთავარი პანელი":
     for branch in inactive_branches:
         st.warning(f"{branch}: ყურადღება, გაყიდვები შეჩერებულია! შეამოწმეთ სტატუსი")
         daily_actions.append(f"[მაღალი] შეამოწმე გაყიდვების სტატუსი: {branch}")
+
+    if st.session_state.get("simulation_stress_mode", False) and detect_stock_discrepancy(df, sales_df):
+        st.warning("აღმოჩენილია აცდენა ნაშთებში. ჩაატარეთ ინვენტარიზაცია.")
+        daily_actions.append("[მაღალი] აღმოჩენილია აცდენა ნაშთებში. ჩაატარეთ ინვენტარიზაცია.")
 
     perf_df = compute_branch_performance(sales_df)
     if not perf_df.empty:
