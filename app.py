@@ -270,6 +270,58 @@ def save_users(users):
     pd.DataFrame(users).to_csv(USERS_FILE, index=False)
 
 
+def get_role_scope(auth_user, mapping_data):
+    role = auth_user.get("role", "")
+    username = auth_user.get("username", "")
+    user_company = mapping_data.get("user_company", {})
+    company_products = mapping_data.get("company_products", {})
+    distributor_stores = mapping_data.get("distributor_stores", {})
+    company = user_company.get(username, auth_user.get("company", ""))
+
+    if role == "Super_Admin":
+        return {"role": role, "stores": None, "products": None}
+    if role == "Store_Manager":
+        branch = auth_user.get("assigned_branch", "") or auth_user.get("store", "")
+        return {"role": role, "stores": set([branch]) if branch else set(), "products": None}
+    if role == "Company_Admin":
+        return {"role": role, "stores": None, "products": set(company_products.get(company, set()))}
+    if role == "Distributor":
+        return {
+            "role": role,
+            "stores": set(distributor_stores.get(username, set())),
+            "products": set(company_products.get(company, set())),
+        }
+    return {"role": role, "stores": set(), "products": set()}
+
+
+def apply_global_data_lock(df, sales_df, audit_df, scope):
+    if scope["role"] == "Super_Admin":
+        return df, sales_df, audit_df
+
+    locked_df = df.copy()
+    locked_sales = sales_df.copy()
+    locked_audit = audit_df.copy()
+
+    stores = scope.get("stores")
+    products = scope.get("products")
+
+    if stores is not None and len(stores) > 0:
+        locked_df = locked_df[locked_df["Store_Name"].astype(str).isin(stores)]
+        if not locked_sales.empty:
+            locked_sales = locked_sales[locked_sales["Store"].astype(str).isin(stores)]
+        if not locked_audit.empty and "Store" in locked_audit.columns:
+            locked_audit = locked_audit[locked_audit["Store"].astype(str).isin(stores)]
+
+    if products is not None and len(products) > 0:
+        locked_df = locked_df[locked_df["Product_Name"].astype(str).isin(products)]
+        if not locked_sales.empty:
+            locked_sales = locked_sales[locked_sales["Product"].astype(str).isin(products)]
+        if not locked_audit.empty and "Product" in locked_audit.columns:
+            locked_audit = locked_audit[locked_audit["Product"].astype(str).isin(products)]
+
+    return locked_df, locked_sales, locked_audit
+
+
 def get_default_page_for_role(role):
     if role == "Super_Admin":
         return "🏢 კომპანიის მართვა"
@@ -286,9 +338,10 @@ def save_data(df):
     df.to_csv(FILE_NAME, index=False)
 
 
-def append_audit_log(product, old_stock, new_stock, difference, reason, cost_price):
+def append_audit_log(store, product, old_stock, new_stock, difference, reason, cost_price):
     log_row = {
         "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Store": str(store),
         "Product": str(product),
         "Old Stock": int(old_stock),
         "New Stock": int(new_stock),
@@ -304,7 +357,7 @@ def append_audit_log(product, old_stock, new_stock, difference, reason, cost_pri
 def load_audit_log():
     if os.path.exists(AUDIT_LOG_FILE):
         log_df = pd.read_csv(AUDIT_LOG_FILE)
-        required_cols = ["Date", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Cost Price"]
+        required_cols = ["Date", "Store", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Cost Price"]
         for col in required_cols:
             if col not in log_df.columns:
                 log_df[col] = 0 if col in ["Old Stock", "New Stock", "Difference", "Cost Price"] else ""
@@ -312,7 +365,7 @@ def load_audit_log():
         log_df["Cost Price"] = pd.to_numeric(log_df["Cost Price"], errors="coerce").fillna(0.0)
         log_df["Shrinkage_Value"] = (-log_df["Difference"]).clip(lower=0) * log_df["Cost Price"]
         return log_df
-    return pd.DataFrame(columns=["Date", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Cost Price", "Shrinkage_Value"])
+    return pd.DataFrame(columns=["Date", "Store", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Cost Price", "Shrinkage_Value"])
 
 
 def append_sales_log(sale_date, store, product, qty, selling_price, cost_price):
@@ -630,9 +683,12 @@ st.session_state.df = recalc_metrics(st.session_state.df)
 
 auth_user = st.session_state.auth_user
 sales_df_all = load_sales_log()
+audit_df_all = load_audit_log()
 mapping_data = load_mapping()
 master_df = st.session_state.df
 df, sales_df_all = apply_role_filters(master_df, sales_df_all, auth_user, mapping_data)
+role_scope = get_role_scope(auth_user, mapping_data)
+df, sales_df_all, audit_df_all = apply_global_data_lock(df, sales_df_all, audit_df_all, role_scope)
 
 # 2. ანალიტიკური გათვლები
 sales_cols = [f"Sales_Day{i}" for i in range(1, 8)]
@@ -654,13 +710,24 @@ if st.sidebar.button("გასვლა", use_container_width=True):
 
 role = auth_user.get("role")
 if role == "Super_Admin":
-    pages = ["🏢 კომპანიის მართვა", "🌍 გლობალური ანალიტიკა"]
+    pages = [
+        "🏢 კომპანიის მართვა",
+        "🌍 გლობალური ანალიტიკა",
+        "🏠 მაღაზიის პანელი",
+        "🛒 გაყიდვები",
+        "📥 მარაგების მიღება",
+        "🚚 აუცილებელი მიწოდებები",
+        "🔔 ინვენტარის გაფრთხილებები",
+        "🤝 დისტრიბუტორების მართვა",
+        "📈 პროდუქტის ეფექტიანობა",
+        "📊 ანგარიშები",
+    ]
 elif role == "Company_Admin":
     pages = ["🤝 დისტრიბუტორების მართვა", "📈 პროდუქტის ეფექტიანობა"]
 elif role == "Store_Manager":
     pages = ["🏠 მაღაზიის პანელი", "🛒 გაყიდვები", "📥 მარაგების მიღება"]
 elif role == "Distributor":
-    pages = ["🚚 აუცილებელი მიწოდებები"]
+    pages = ["🚚 აუცილებელი მიწოდებები", "🔔 ინვენტარის გაფრთხილებები"]
 else:
     pages = ["🏢 კომპანიის მართვა"]
 # Stable navigation: keep radio state separate from programmatic redirects.
@@ -836,6 +903,21 @@ elif page == "🚚 აუცილებელი მიწოდებები
                 st.error(f"{store_name} - {product_name}: ნაშთი 0. მიაწოდეთ მინიმუმ {recommended_qty} ერთეული.")
             else:
                 st.warning(f"{store_name} - {product_name}: ნაშთი {current_stock}. რეკომენდაცია: +{recommended_qty} ერთეული.")
+
+elif page == "🔔 ინვენტარის გაფრთხილებები":
+    st.title("🔔 ინვენტარის გაფრთხილებები")
+    low_stock_alerts = get_low_stock_alerts(df, threshold=5)
+    if low_stock_alerts.empty:
+        st.info("აქტიური გაფრთხილება არ არის.")
+    else:
+        for _, row in low_stock_alerts.iterrows():
+            store_name = str(row["Store_Name"])
+            product_name = str(row["Product_Name"])
+            current_stock = int(row["Current_Stock"])
+            if current_stock <= 0:
+                st.error(f"{store_name}: {product_name} ამოიწურა.")
+            else:
+                st.warning(f"{store_name}: {product_name} იწურება. ნაშთი: {current_stock}")
 
 elif page == "🏠 მაღაზიის პანელი":
     st.title("🏠 მაღაზიის პანელი")
@@ -1104,7 +1186,15 @@ elif page == "🔍 ინვენტარიზაცია":
                 full_df = recalc_metrics(full_df)
                 save_data(full_df)
                 st.session_state.df = full_df
-                append_audit_log(product_name, old_stock, updated_stock, difference, reason, cost_price)
+                append_audit_log(
+                    store=df.at[selected_idx, "Store_Name"],
+                    product=product_name,
+                    old_stock=old_stock,
+                    new_stock=updated_stock,
+                    difference=difference,
+                    reason=reason,
+                    cost_price=cost_price,
+                )
                 st.success("ინვენტარის ცვლილება შენახულია და აუდიტის ჟურნალი განახლდა.")
                 st.rerun()
 
@@ -1262,7 +1352,7 @@ elif page == "📊 ანგარიშები":
     st.caption("მოწესრიგებული ანგარიშები მენეჯმენტისა და ბუღალტრული კონტროლისთვის.")
 
     report_tab1, report_tab2 = st.tabs(["📉 ზარალის ანგარიში", "📦 მარაგების მიმოხილვა"])
-    audit_df = load_audit_log()
+    audit_df = audit_df_all.copy()
 
     with report_tab1:
         total_shrinkage_value = float(audit_df["Shrinkage_Value"].sum()) if not audit_df.empty else 0.0
