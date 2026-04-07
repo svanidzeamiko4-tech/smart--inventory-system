@@ -1813,7 +1813,7 @@ elif page == "📍 ვიზიტები":
 
 elif page == "🚚 აუცილებელი მიწოდებები":
     st.title("🚚 აუცილებელი მიწოდებები")
-    st.caption("დისტრიბუტორის სამუშაო ეკრანი — მარშრუტი, ვიზიტი, ბორტის ნაშთი.")
+    st.caption("დისტრიბუტორის სამუშაო ეკრანი — მარშრუტი, პრიორიტეტული ვიზიტი, ბორტის ნაშთი.")
 
     delivery_df = load_delivery_log()
     user_company = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
@@ -1838,16 +1838,49 @@ elif page == "🚚 აუცილებელი მიწოდებები
     }
     low_stock_alerts = get_low_stock_alerts(df, threshold=5)
 
+    # --- Critical Alerts for Distributor ---
+    st.subheader("🔔 ყურადღება მისაქცევია!")
+    critical_rows = []
+    if not df.empty:
+        tmp_df = df.copy()
+        tmp_df["Current_Stock"] = pd.to_numeric(tmp_df["Current_Stock"], errors="coerce").fillna(0)
+        crit_mask = tmp_df["Current_Stock"] < 5
+        for _, row in tmp_df[crit_mask].iterrows():
+            critical_rows.append(
+                f"{row['Store_Name']}-ში {row['Product_Name']} იწურება (ნაშთი: {int(row['Current_Stock'])})!"
+            )
+    if critical_rows:
+        for msg in critical_rows:
+            st.warning(f"🟥 კრიტიკული ნაშთი: {msg}")
+    else:
+        st.info("კრიტიკული ნაშთი ამ ეტაპზე არ ფიქსირდება.")
+
     route_tab, stock_tab = st.tabs(["🗺️ მარშრუტი", "📦 ბორტის ნაშთი"])
 
     with route_tab:
         assigned_stores = sorted(df["Store_Name"].astype(str).unique().tolist()) if not df.empty else []
+        # Push stores with low stock to top (პრიორიტეტული ვიზიტი).
+        priority_scores = {}
+        if not df.empty:
+            tmp_df = df.copy()
+            tmp_df["Current_Stock"] = pd.to_numeric(tmp_df["Current_Stock"], errors="coerce").fillna(0)
+            for store_name in assigned_stores:
+                store_mask = tmp_df["Store_Name"].astype(str) == str(store_name)
+                low_count = int((tmp_df.loc[store_mask, "Current_Stock"] < 5).sum())
+                priority_scores[store_name] = low_count
+            assigned_stores = sorted(
+                assigned_stores,
+                key=lambda s: priority_scores.get(s, 0),
+                reverse=True,
+            )
         if not assigned_stores:
             st.info("მარშრუტზე მაღაზიები არ არის მინიჭებული.")
         else:
             for store_name in assigned_stores:
                 st.markdown(f"### 🏪 {store_name}")
                 st.caption(f"მისამართი: {store_addresses.get(store_name, 'მისამართი არ არის მითითებული')}")
+                if priority_scores.get(store_name, 0) > 0:
+                    st.error("📌 პრიორიტეტული ვიზიტი — კრიტიკული ნაშთი ფიქსირდება.")
                 if st.button("ვიზიტის დაწყება", key=f"route_start_{store_name}", use_container_width=True):
                     st.session_state["active_route_store"] = store_name
                     st.rerun()
@@ -1874,12 +1907,12 @@ elif page == "🚚 აუცილებელი მიწოდებები
                             truck_qty = get_truck_qty(auth_user.get("username", ""), product_name)
                             c1, c2 = st.columns([2, 1])
                             if live_stock < 10:
-                                c1.error(f"🔴 {product_name} — Low Stock")
+                                c1.error(f"🔴 {product_name} — კრიტიკული ნაშთი")
                             else:
                                 c1.markdown(f"**{product_name}**")
                             c1.caption(f"🛒 მაღაზიის ნაშთი: {live_stock}")
                             c1.caption(f"📈 გუშინდელი გაყიდვა: {yesterday_sales}")
-                            c1.caption(f"შემოთავაზებული რაოდენობა: {rec_qty} | საშუალო დღიური გაყიდვა: {avg_daily:.1f}")
+                            c1.caption(f"📦 შემოთავაზებული რაოდენობა: {rec_qty} | საშუალო დღიური გაყიდვა: {avg_daily:.1f}")
                             c1.caption(f"🚚 ბორტზე ხელმისაწვდომი: {truck_qty}")
                             delivered_qty = c1.number_input(
                                 f"{product_name} — მიწოდებული რაოდენობა (ხელით შესაცვლელი)",
