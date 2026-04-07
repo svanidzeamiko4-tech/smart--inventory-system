@@ -9,10 +9,29 @@ st.set_page_config(page_title="ERP Smart System", layout="wide")
 FILE_NAME = "Product.csv.txt"
 
 # 1. მონაცემების მართვა
+def ensure_data_structure(df):
+    if df.empty:
+        return df
+
+    if "Cost_Price" not in df.columns:
+        df["Cost_Price"] = 0.0
+    if "Selling_Price" not in df.columns:
+        # Backward-compatible default for old rows.
+        if "Price" in df.columns:
+            df["Selling_Price"] = pd.to_numeric(df["Price"], errors="coerce").fillna(0.0)
+        else:
+            df["Selling_Price"] = 0.0
+
+    df["Cost_Price"] = pd.to_numeric(df["Cost_Price"], errors="coerce").fillna(0.0)
+    df["Selling_Price"] = pd.to_numeric(df["Selling_Price"], errors="coerce").fillna(0.0)
+    return df
+
+
 def load_data():
     if os.path.exists(FILE_NAME):
         df = pd.read_csv(FILE_NAME)
         df['Expiry_Date'] = pd.to_datetime(df['Expiry_Date'])
+        df = ensure_data_structure(df)
         return df
     return pd.DataFrame()
 
@@ -37,7 +56,18 @@ def recalc_metrics(df):
 if 'df' not in st.session_state:
     st.session_state.df = load_data()
 
+# Profit tracker resets automatically each day.
+today_str = datetime.now().strftime("%Y-%m-%d")
+if 'profit_date' not in st.session_state:
+    st.session_state.profit_date = today_str
+if 'daily_profit' not in st.session_state:
+    st.session_state.daily_profit = 0.0
+if st.session_state.profit_date != today_str:
+    st.session_state.profit_date = today_str
+    st.session_state.daily_profit = 0.0
+
 # Ensure metrics exist after loading
+st.session_state.df = ensure_data_structure(st.session_state.df)
 st.session_state.df = recalc_metrics(st.session_state.df)
 
 # RS.GE-ს სიმულაციური ზედნადებები
@@ -94,10 +124,11 @@ if page == "📊 Dashboard & ანალიტიკა":
         st.rerun()
 
     # ინდიკატორები
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("📦 სულ პროდუქცია", len(df))
     c2.metric("⚠️ კრიტიკული ვადა", len(df[df["დღე ვადის გასვლამდე"] < 5]))
     c3.metric("📉 დაბალი მარაგი", len(df[df["დარჩენილი დღე"] < 3]))
+    c4.metric("💰 Daily Profit", f"{st.session_state.daily_profit:.2f}")
 
     st.divider()
     st.subheader("📋 დეტალური ნაშთები")
@@ -117,6 +148,8 @@ if page == "📊 Dashboard & ანალიტიკა":
         c4.write(row["დღე ვადის გასვლამდე"])
         can_sell = row["Current_Stock"] > 0
         if c5.button("Sell", key=f"sell_{index}", disabled=not can_sell):
+            unit_profit = float(row.get("Selling_Price", 0)) - float(row.get("Cost_Price", 0))
+            st.session_state.daily_profit += unit_profit
             df.at[index, "Current_Stock"] = max(0, int(row["Current_Stock"]) - 1)
             df = recalc_metrics(df)
             save_data(df)
@@ -136,7 +169,8 @@ elif page == "📥 მარაგების დამატება":
         f_store = col1.selectbox("მაღაზია", df["Store_Name"].unique() if not df.empty else ["Gldani_Branch"])
         f_name = col2.text_input("პროდუქტი")
         f_qty = col1.number_input("რაოდენობა", min_value=1)
-        f_price = col2.number_input("ფასი", min_value=0.0, format="%.2f")
+        f_cost_price = col1.number_input("Cost Price", min_value=0.0, format="%.2f")
+        f_selling_price = col2.number_input("Selling Price", min_value=0.0, format="%.2f")
         f_expiry = col2.date_input("ვადა")
         submitted = st.form_submit_button("შენახვა")
 
@@ -145,7 +179,9 @@ elif page == "📥 მარაგების დამატება":
             "Store_Name": f_store,
             "Product_Name": f_name,
             "Current_Stock": int(f_qty),
-            "Price": float(f_price),
+            "Cost_Price": float(f_cost_price),
+            "Selling_Price": float(f_selling_price),
+            "Price": float(f_selling_price),
             "Sales_Day1": 0,
             "Sales_Day2": 0,
             "Sales_Day3": 0,
