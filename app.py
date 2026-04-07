@@ -379,13 +379,19 @@ pages = [
     "📈 დეტალური ანალიტიკა",
     "📊 ანგარიშები",
 ]
-if "page_nav" not in st.session_state or st.session_state.page_nav not in pages:
-    st.session_state.page_nav = pages[0]
+# Stable navigation: keep radio state separate from programmatic redirects.
+if "current_page" not in st.session_state or st.session_state.current_page not in pages:
+    st.session_state.current_page = pages[0]
+if "pending_page" in st.session_state and st.session_state.pending_page in pages:
+    st.session_state.current_page = st.session_state.pending_page
+    del st.session_state["pending_page"]
+
 page = st.sidebar.radio(
     "გადადი გვერდზე:",
     pages,
-    key="page_nav",
+    index=pages.index(st.session_state.current_page),
 )
+st.session_state.current_page = page
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🚀 საჩვენებელი რეჟიმი")
@@ -456,7 +462,7 @@ if page == "🏠 მთავარი პანელი":
                 )
                 st.info(f"{product_name} იწურება. ბოლო კვირის გაყიდვებით გირჩევთ დაამატოთ {recommended_qty} რაოდენობა")
                 if st.button("მიღება", key=f"goto_add_stock_{idx}"):
-                    st.session_state.page_nav = "📥 საქონლის მიღება"
+                    st.session_state.pending_page = "📥 საქონლის მიღება"
                     st.session_state.prefill_product = product_name
                     st.session_state.prefill_store = store_name
                     st.session_state.prefill_qty = max(1, recommended_qty)
@@ -530,7 +536,7 @@ elif page == "📦 პროდუქციის სია":
             if not can_sell or sell_qty > current_stock:
                 st.warning("ნაშთზე მეტი გაყიდვა ვერ შესრულდება. არის თუ არა დათვლის შეცდომა? პირველ რიგში გაასწორე ინვენტარი.")
                 if st.button("ნაშთის გასწორება", key=f"fix_inventory_{index}"):
-                    st.session_state.page_nav = "🔍 ინვენტარიზაცია"
+                    st.session_state.pending_page = "🔍 ინვენტარიზაცია"
                     st.rerun()
                 continue
             unit_profit = float(row.get("Selling_Price", 0)) - float(row.get("Cost_Price", 0))
