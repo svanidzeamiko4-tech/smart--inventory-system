@@ -9,6 +9,12 @@ st.set_page_config(page_title="ERP Smart System", layout="wide")
 FILE_NAME = "Product.csv.txt"
 AUDIT_LOG_FILE = "audit_log.csv"
 SALES_LOG_FILE = "sales_log.csv"
+STORE_NAME_MAP = {
+    "Gldani_Branch": "გლდანის ფილიალი",
+    "Vake_Branch": "ვაკის ფილიალი",
+    "Saburtalo_Branch": "საბურთალოს ფილიალი",
+    "Didube_Branch": "დიდუბის ფილიალი",
+}
 
 # 1. მონაცემების მართვა
 def ensure_data_structure(df):
@@ -108,6 +114,12 @@ def load_sales_log():
         fallback_ts = pd.to_datetime(sales_df["Date"], errors="coerce")
         sales_df["Timestamp"] = sales_df["Timestamp"].fillna(fallback_ts)
         sales_df["Date"] = sales_df["Timestamp"].dt.date
+
+        # One-time migration for historical English store names.
+        original_store = sales_df["Store"].astype(str)
+        sales_df["Store"] = original_store.replace(STORE_NAME_MAP)
+        if not sales_df["Store"].astype(str).equals(original_store):
+            sales_df.to_csv(SALES_LOG_FILE, index=False)
 
         for numeric_col in ["Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"]:
             sales_df[numeric_col] = pd.to_numeric(sales_df[numeric_col], errors="coerce").fillna(0)
