@@ -122,7 +122,7 @@ def reset_system_data():
 
 
 def generate_month_sales_simulation(current_df, transactions=10000):
-    stores = ["Gldani_Branch", "Vake_Branch", "Saburtalo_Branch", "Didube_Branch"]
+    stores = ["გლდანის ფილიალი", "ვაკის ფილიალი", "საბურთალოს ფილიალი", "დიდუბის ფილიალი"]
     products = [
         ("Apple", 1.20, 2.10),
         ("Banana", 0.80, 1.60),
@@ -452,7 +452,10 @@ if page == "🏠 მთავარი პანელი":
             product_name = str(row["Product_Name"])
             current_stock = int(row["Current_Stock"])
             daily_actions.append(f"[მაღალი] შეამოწმე ნაშთი: {store_name} - {product_name}")
-            st.warning(f"{store_name}: {product_name} იწურება! (ნაშთი: {current_stock})")
+            if current_stock <= 0:
+                st.error(f"{store_name}: {product_name} ამოიწურა! (ნაშთი: {current_stock})")
+            else:
+                st.warning(f"{store_name}: {product_name} იწურება! (ნაშთი: {current_stock})")
             if current_stock <= 2:
                 st.warning(f"{product_name} კრიტიკულად ცოტაა! დისტრიბუტორმა დაიგვიანა. სასწრაფოდ შეუკვეთეთ.")
                 daily_actions.append(f"[უმაღლესი] {product_name} კრიტიკულად ცოტაა! დისტრიბუტორმა დაიგვიანა. სასწრაფოდ შეუკვეთეთ.")
@@ -568,7 +571,7 @@ elif page == "📥 საქონლის მიღება":
         st.markdown("### 🧾 ზედნადების შევსება")
         st.markdown("შეავსე ზედნადების ინფორმაცია და შეინახე პროდუქტის ჩანაწერი.")
 
-    store_options = df["Store_Name"].unique() if not df.empty else ["Gldani_Branch"]
+    store_options = df["Store_Name"].unique() if not df.empty else ["გლდანის ფილიალი"]
     prefill_product = st.session_state.pop("prefill_product", "")
     prefill_store = st.session_state.pop("prefill_store", "")
     prefill_qty = st.session_state.pop("prefill_qty", None)
