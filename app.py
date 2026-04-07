@@ -14,6 +14,7 @@ SALES_LOG_FILE = "sales_log.csv"
 USERS_FILE = "users.csv"
 DISTRIBUTOR_MAP_FILE = "distributor_mapping.json"
 MAPPING_FILE = "mapping.csv"
+BALANCE_FILE = "balances.csv"
 STORE_NAME_MAP = {
     "Gldani_Branch": "გლდანის ფილიალი",
     "Vake_Branch": "ვაკის ფილიალი",
@@ -129,6 +130,15 @@ def ensure_auth_files():
         )
         default_mapping.to_csv(MAPPING_FILE, index=False)
 
+    if not os.path.exists(BALANCE_FILE):
+        default_balances = pd.DataFrame(
+            [
+                {"company": "Ifkli", "store": "გლდანის ფილიალი", "balance": -1250.0},
+                {"company": "Ifkli", "store": "ვაკის ფილიალი", "balance": 320.0},
+            ]
+        )
+        default_balances.to_csv(BALANCE_FILE, index=False)
+
 
 def load_mapping():
     ensure_auth_files()
@@ -156,6 +166,13 @@ def load_mapping():
         "company_products": company_products,
         "distributor_stores": distributor_stores,
     }
+
+
+def load_balances_for_company(company_name):
+    ensure_auth_files()
+    balances_df = pd.read_csv(BALANCE_FILE, dtype={"company": str, "store": str, "balance": float}).fillna("")
+    balances_df["balance"] = pd.to_numeric(balances_df["balance"], errors="coerce").fillna(0.0)
+    return balances_df[balances_df["company"].astype(str) == str(company_name)].copy()
 
 
 def load_users():
@@ -727,7 +744,7 @@ elif role == "Company_Admin":
 elif role == "Store_Manager":
     pages = ["🏠 მაღაზიის პანელი", "🛒 გაყიდვები", "📥 მარაგების მიღება"]
 elif role == "Distributor":
-    pages = ["🚚 აუცილებელი მიწოდებები", "🔔 ინვენტარის გაფრთხილებები"]
+    pages = ["📍 ვიზიტები", "🚚 აუცილებელი მიწოდებები", "🔔 ინვენტარის გაფრთხილებები"]
 else:
     pages = ["🏢 კომპანიის მართვა"]
 # Stable navigation: keep radio state separate from programmatic redirects.
@@ -885,6 +902,83 @@ if page == "🏢 კომპანიის მართვა":
     else:
         for i, action in enumerate(daily_actions[:8], start=1):
             st.write(f"{i}. {action}")
+
+elif page == "📍 ვიზიტები":
+    st.title("📍 ვიზიტები")
+    st.caption("კლიენტების სია პრიორიტეტით - პირველ რიგში ყველაზე გადაუდებელი ვიზიტები.")
+    low_stock_alerts = get_low_stock_alerts(df, threshold=5)
+    user_company = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
+    balances_df = load_balances_for_company(user_company)
+
+    if low_stock_alerts.empty:
+        st.info("ვიზიტისთვის გადაუდებელი ობიექტები არ მოიძებნა.")
+    else:
+        rows = []
+        for store_name, group in low_stock_alerts.groupby("Store_Name"):
+            critical = int((group["Current_Stock"] <= 0).sum())
+            low = int((group["Current_Stock"] > 0).sum())
+            shortage_points = int((5 - group["Current_Stock"].clip(upper=5)).sum())
+            urgency_score = critical * 10 + low * 4 + shortage_points
+            store_balance = balances_df[balances_df["store"].astype(str) == str(store_name)]["balance"].sum()
+            rows.append(
+                {
+                    "store": str(store_name),
+                    "critical": critical,
+                    "low": low,
+                    "urgency": urgency_score,
+                    "balance": float(store_balance),
+                }
+            )
+        visits_df = pd.DataFrame(rows).sort_values("urgency", ascending=False)
+
+        for _, visit in visits_df.iterrows():
+            store_name = visit["store"]
+            balance = float(visit["balance"])
+            balance_text = f"დავალიანება: {abs(balance):.2f}" if balance < 0 else f"კრედიტი: {balance:.2f}"
+            with st.container(border=True):
+                st.markdown(f"### {store_name}")
+                st.markdown(
+                    f"**გადაუდებლობის ქულა:** {int(visit['urgency'])} | "
+                    f"**კრიტიკული პროდუქტი:** {int(visit['critical'])} | "
+                    f"**დაბალი ნაშთი:** {int(visit['low'])}"
+                )
+                st.markdown(f"**ბალანსი:** {balance_text}")
+                if st.button("შეკვეთის გახსნა", key=f"visit_open_{store_name}"):
+                    st.session_state["distributor_selected_store"] = store_name
+                    st.rerun()
+
+        selected_store = st.session_state.get("distributor_selected_store", "")
+        if selected_store:
+            st.divider()
+            st.subheader(f"შეკვეთის ფორმა: {selected_store}")
+            store_items = low_stock_alerts[low_stock_alerts["Store_Name"].astype(str) == str(selected_store)]
+            if store_items.empty:
+                st.info("არჩეული ფილიალისთვის დაბალი ნაშთის რეკომენდაციები არ არის.")
+            else:
+                sales_df = sales_df_all.copy()
+                with st.form("distributor_order_form"):
+                    order_rows = []
+                    for i, (_, item) in enumerate(store_items.iterrows()):
+                        product_name = str(item["Product_Name"])
+                        current_stock = int(item["Current_Stock"])
+                        _, recommended_qty = get_restock_recommendation_qty(
+                            sales_df, product_name, selected_store, current_stock
+                        )
+                        qty = st.number_input(
+                            f"{product_name} (ნაშთი: {current_stock})",
+                            min_value=0,
+                            value=max(0, int(recommended_qty)),
+                            step=1,
+                            key=f"dist_order_qty_{i}_{product_name}",
+                        )
+                        order_rows.append({"product": product_name, "qty": int(qty)})
+                    submit_order = st.form_submit_button("შეკვეთის დადასტურება")
+                if submit_order:
+                    confirmed = [r for r in order_rows if r["qty"] > 0]
+                    if not confirmed:
+                        st.warning("შეკვეთაში რაოდენობა არ არის მითითებული.")
+                    else:
+                        st.success(f"{selected_store}-ისთვის შეკვეთა მომზადდა ({len(confirmed)} პროდუქტი).")
 
 elif page == "🚚 აუცილებელი მიწოდებები":
     st.title("🚚 აუცილებელი მიწოდებები")
