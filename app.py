@@ -7,6 +7,7 @@ import os
 
 st.set_page_config(page_title="ERP Smart System", layout="wide")
 FILE_NAME = "Product.csv.txt"
+AUDIT_LOG_FILE = "audit_log.csv"
 
 # 1. მონაცემების მართვა
 def ensure_data_structure(df):
@@ -38,6 +39,35 @@ def load_data():
 
 def save_data(df):
     df.to_csv(FILE_NAME, index=False)
+
+
+def append_audit_log(product, old_stock, new_stock, difference, reason, cost_price):
+    log_row = {
+        "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Product": str(product),
+        "Old Stock": int(old_stock),
+        "New Stock": int(new_stock),
+        "Difference": int(difference),
+        "Reason": str(reason),
+        "Cost Price": float(cost_price)
+    }
+    log_df = pd.DataFrame([log_row])
+    write_header = not os.path.exists(AUDIT_LOG_FILE)
+    log_df.to_csv(AUDIT_LOG_FILE, mode="a", header=write_header, index=False)
+
+
+def load_audit_log():
+    if os.path.exists(AUDIT_LOG_FILE):
+        log_df = pd.read_csv(AUDIT_LOG_FILE)
+        required_cols = ["Date", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Cost Price"]
+        for col in required_cols:
+            if col not in log_df.columns:
+                log_df[col] = 0 if col in ["Old Stock", "New Stock", "Difference", "Cost Price"] else ""
+        log_df["Difference"] = pd.to_numeric(log_df["Difference"], errors="coerce").fillna(0)
+        log_df["Cost Price"] = pd.to_numeric(log_df["Cost Price"], errors="coerce").fillna(0.0)
+        log_df["Shrinkage_Value"] = (-log_df["Difference"]).clip(lower=0) * log_df["Cost Price"]
+        return log_df
+    return pd.DataFrame(columns=["Date", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Cost Price", "Shrinkage_Value"])
 
 
 def recalc_metrics(df):
@@ -90,7 +120,10 @@ df["დღე ვადის გასვლამდე"] = (pd.to_datetime(df
 
 # --- მთავარი გვერდითა მენიუ ---
 st.sidebar.title("🎛️ მართვის პანელი")
-page = st.sidebar.radio("გადადი გვერდზე:", ["📊 Dashboard & ანალიტიკა", "📥 მარაგების დამატება", "🔗 RS.GE ინტეგრაცია"])
+page = st.sidebar.radio(
+    "გადადი გვერდზე:",
+    ["📊 Dashboard & ანალიტიკა", "📥 მარაგების დამატება", "🧾 Inventory Audit", "🔗 RS.GE ინტეგრაცია"]
+)
 
 # --- გვერდი 1: DASHBOARD ---
 if page == "📊 Dashboard & ანალიტიკა":
@@ -197,6 +230,58 @@ elif page == "📥 მარაგების დამატება":
         st.session_state.df = df
         st.success("პროდუქტი შენახულია")
         st.experimental_rerun()
+
+elif page == "🧾 Inventory Audit":
+    st.title("🧾 Inventory Audit")
+
+    if df.empty:
+        st.info("პროდუქტები არ არის დამატებული.")
+    else:
+        options = {
+            f"{row['Store_Name']} | {row['Product_Name']} (Stock: {int(row['Current_Stock'])})": idx
+            for idx, row in df.iterrows()
+        }
+        reasons = ["Damaged", "Expired", "Inventory Mismatch", "Other"]
+
+        with st.form("inventory_audit_form"):
+            selected_label = st.selectbox("აირჩიე პროდუქტი", list(options.keys()))
+            selected_idx = options[selected_label]
+            current_stock = int(df.at[selected_idx, "Current_Stock"])
+            new_stock = st.number_input("ახალი ნაშთი", min_value=0, value=current_stock, step=1)
+            reason = st.selectbox("Reason", reasons)
+            submitted_audit = st.form_submit_button("განახლება და ლოგირება")
+
+        if submitted_audit:
+            old_stock = current_stock
+            updated_stock = int(new_stock)
+            difference = updated_stock - old_stock
+            product_name = df.at[selected_idx, "Product_Name"]
+            cost_price = float(df.at[selected_idx, "Cost_Price"]) if "Cost_Price" in df.columns else 0.0
+
+            if difference == 0:
+                st.warning("ცვლილება არ დაფიქსირდა - ნაშთი უცვლელია.")
+            else:
+                df.at[selected_idx, "Current_Stock"] = updated_stock
+                df = recalc_metrics(df)
+                save_data(df)
+                st.session_state.df = df
+                append_audit_log(product_name, old_stock, updated_stock, difference, reason, cost_price)
+                st.success("ინვენტარის ცვლილება შენახულია და audit log განახლდა.")
+                st.rerun()
+
+    st.divider()
+    st.subheader("ზარალის ანგარიში")
+    audit_df = load_audit_log()
+    total_shrinkage_value = float(audit_df["Shrinkage_Value"].sum()) if not audit_df.empty else 0.0
+    st.metric("ჯამური ზარალი (Cost საფუძველზე)", f"{total_shrinkage_value:.2f}")
+
+    if not audit_df.empty:
+        st.dataframe(
+            audit_df[["Date", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Shrinkage_Value"]],
+            use_container_width=True
+        )
+    else:
+        st.info("Audit ჩანაწერები ჯერ არ არსებობს.")
 
 elif page == "🔗 RS.GE ინტეგრაცია":
     st.title("🔗 RS.GE ინტეგრაცია")
