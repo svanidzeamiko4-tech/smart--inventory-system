@@ -878,26 +878,45 @@ def save_data(df):
 
 
 def ensure_product_row(df, store_name, product_name, qty, cost_price, selling_price):
+    def _to_int(v, default=0):
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _to_float(v, default=0.0):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float(default)
+
+    store_name = str(store_name).strip()
+    product_name = str(product_name).strip()
+    qty = _to_int(qty, 0)
+    cost_price = _to_float(cost_price, 0.0)
+    selling_price = _to_float(selling_price, 0.0)
+
+    # Robust sync: match by normalized store/product to avoid type/text mismatches.
     mask = (
-        (df["Store_Name"].astype(str) == str(store_name))
-        & (df["Product_Name"].astype(str) == str(product_name))
+        (df["Store_Name"].astype(str).str.strip() == store_name)
+        & (df["Product_Name"].astype(str).str.strip() == product_name)
     )
     if mask.any():
         idx = df[mask].index[0]
-        df.at[idx, "Current_Stock"] = int(df.at[idx, "Current_Stock"]) + int(qty)
-        if float(df.at[idx].get("Cost_Price", 0)) <= 0:
-            df.at[idx, "Cost_Price"] = float(cost_price)
-        if float(df.at[idx].get("Selling_Price", 0)) <= 0:
-            df.at[idx, "Selling_Price"] = float(selling_price)
+        df.at[idx, "Current_Stock"] = _to_int(df.at[idx, "Current_Stock"], 0) + qty
+        if _to_float(df.at[idx].get("Cost_Price", 0), 0.0) <= 0:
+            df.at[idx, "Cost_Price"] = cost_price
+        if _to_float(df.at[idx].get("Selling_Price", 0), 0.0) <= 0:
+            df.at[idx, "Selling_Price"] = selling_price
         return df
 
     new_row = {
         "Store_Name": store_name,
         "Product_Name": product_name,
-        "Current_Stock": int(qty),
-        "Cost_Price": float(cost_price),
-        "Selling_Price": float(selling_price),
-        "Price": float(selling_price),
+        "Current_Stock": qty,
+        "Cost_Price": cost_price,
+        "Selling_Price": selling_price,
+        "Price": selling_price,
         "Sales_Day1": 0,
         "Sales_Day2": 0,
         "Sales_Day3": 0,
@@ -1733,33 +1752,37 @@ elif page == "🚚 აუცილებელი მიწოდებები
                             st.warning("მიუთითეთ მინიმუმ ერთი პროდუქტის მიწოდებული რაოდენობა.")
                         else:
                             full_df = st.session_state.df.copy()
+                            notes_clean = notes.strip() if isinstance(notes, str) else ""
                             for r in valid_rows:
+                                qty_val = int(float(r.get("qty", 0) or 0))
+                                unit_price_val = float(r.get("unit_price", 0.0) or 0.0)
+                                issue_val = str(r.get("issue", "") or "")
                                 full_df = ensure_product_row(
                                     full_df,
                                     active_store,
                                     r["product"],
-                                    r["qty"],
+                                    qty_val,
                                     0.0,
-                                    r["unit_price"],
+                                    unit_price_val,
                                 )
                                 append_delivery_log(
                                     username=auth_user.get("username", ""),
                                     company=user_company,
                                     store=active_store,
                                     product=r["product"],
-                                    qty=r["qty"],
-                                    unit_price=r["unit_price"],
+                                    qty=qty_val,
+                                    unit_price=unit_price_val,
                                     rs_status="Pending on RS.GE",
                                 )
-                                if r["issue"] != "None" or notes.strip():
+                                if issue_val and issue_val != "None" or notes_clean:
                                     append_discrepancy_log(
                                         distributor=str(auth_user.get("username", "")),
                                         company=user_company,
                                         store=active_store,
                                         product=r["product"],
-                                        ordered_qty=r["qty"],
-                                        confirmed_qty=r["qty"],
-                                        reason=f"Issue={r['issue']} | {notes.strip()}",
+                                        ordered_qty=qty_val,
+                                        confirmed_qty=qty_val,
+                                        reason=f"Issue={issue_val if issue_val else 'None'} | {notes_clean}",
                                         corrected_by=str(auth_user.get("username", "")),
                                     )
                             full_df = recalc_metrics(full_df)
