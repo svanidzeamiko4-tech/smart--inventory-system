@@ -68,6 +68,7 @@ def ensure_auth_files():
                     "password_hash": hash_password("admin123"),
                     "role": "Super_Admin",
                     "company": "Global",
+                    "retail_chain": "Global",
                     "store": "",
                     "commission_rate": 0.0,
                     "allowed_stores": "",
@@ -78,6 +79,7 @@ def ensure_auth_files():
                     "password_hash": hash_password("manager123"),
                     "role": "Store_Manager",
                     "company": "Ifkli",
+                    "retail_chain": "Ifkli_Retail",
                     "store": "გლდანის ფილიალი",
                     "assigned_branch": "გლდანის ფილიალი",
                     "commission_rate": 0.0,
@@ -89,6 +91,7 @@ def ensure_auth_files():
                     "password_hash": hash_password("ifkli123"),
                     "role": "Company_Admin",
                     "company": "Ifkli",
+                    "retail_chain": "Ifkli_Retail",
                     "store": "",
                     "assigned_branch": "",
                     "commission_rate": 0.0,
@@ -100,6 +103,7 @@ def ensure_auth_files():
                     "password_hash": hash_password("operator123"),
                     "role": "Company_Operator",
                     "company": "Ifkli",
+                    "retail_chain": "Ifkli_Retail",
                     "store": "",
                     "assigned_branch": "",
                     "commission_rate": 0.0,
@@ -107,10 +111,35 @@ def ensure_auth_files():
                     "allowed_products": "Apple|Banana|Milk|Bread|Rice",
                 },
                 {
+                    "username": "ifkli_retail_operator",
+                    "password_hash": hash_password("retail123"),
+                    "role": "Retail_Operator",
+                    "company": "Ifkli",
+                    "retail_chain": "Ifkli_Retail",
+                    "store": "",
+                    "assigned_branch": "",
+                    "commission_rate": 0.0,
+                    "allowed_stores": "გლდანის ფილიალი|ვაკის ფილიალი|საბურთალოს ფილიალი|დიდუბის ფილიალი",
+                    "allowed_products": "Apple|Banana|Milk|Bread|Rice",
+                },
+                {
+                    "username": "ifkli_supplier_operator",
+                    "password_hash": hash_password("supplier123"),
+                    "role": "Supplier_Operator",
+                    "company": "Ifkli",
+                    "retail_chain": "Ifkli_Retail",
+                    "store": "",
+                    "assigned_branch": "",
+                    "commission_rate": 0.0,
+                    "allowed_stores": "გლდანის ფილიალი|ვაკის ფილიალი|საბურთალოს ფილიალი|დიდუბის ფილიალი",
+                    "allowed_products": "Apple|Banana|Milk|Bread|Rice",
+                },
+                {
                     "username": "distributor_a",
                     "password_hash": hash_password("dist123"),
                     "role": "Distributor",
                     "company": "Ifkli",
+                    "retail_chain": "Ifkli_Retail",
                     "store": "",
                     "assigned_branch": "",
                     "commission_rate": 0.05,
@@ -339,7 +368,7 @@ def save_pending_deliveries(pdf):
     pdf.to_csv(PENDING_DELIVERY_FILE, index=False)
 
 
-def append_discrepancy_log(distributor, company, store, product, ordered_qty, confirmed_qty, reason):
+def append_discrepancy_log(distributor, company, store, product, ordered_qty, confirmed_qty, reason, corrected_by=""):
     diff = int(ordered_qty) - int(confirmed_qty)
     row = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -351,6 +380,7 @@ def append_discrepancy_log(distributor, company, store, product, ordered_qty, co
         "confirmed_qty": int(confirmed_qty),
         "difference": int(diff),
         "reason": str(reason),
+        "corrected_by": str(corrected_by),
     }
     pd.DataFrame([row]).to_csv(
         DISCREPANCY_LOG_FILE,
@@ -363,10 +393,12 @@ def append_discrepancy_log(distributor, company, store, product, ordered_qty, co
 def load_discrepancy_log():
     ensure_auth_files()
     if not os.path.exists(DISCREPANCY_LOG_FILE):
-        return pd.DataFrame(columns=["timestamp", "distributor", "company", "store", "product", "ordered_qty", "confirmed_qty", "difference", "reason"])
+        return pd.DataFrame(columns=["timestamp", "distributor", "company", "store", "product", "ordered_qty", "confirmed_qty", "difference", "reason", "corrected_by"])
     dlog = pd.read_csv(DISCREPANCY_LOG_FILE)
     if dlog.empty:
         return dlog
+    if "corrected_by" not in dlog.columns:
+        dlog["corrected_by"] = ""
     dlog["difference"] = pd.to_numeric(dlog["difference"], errors="coerce").fillna(0)
     return dlog
 
@@ -466,6 +498,19 @@ def save_adjustment_requests(rdf):
     rdf.to_csv(ADJUSTMENT_REQUEST_FILE, index=False)
 
 
+def update_adjustment_request_status(request_id, status, reviewed_by):
+    latest = load_adjustment_requests()
+    if latest.empty:
+        return False
+    mask = latest["request_id"].astype(str) == str(request_id)
+    if not mask.any():
+        return False
+    latest.loc[mask, "status"] = str(status)
+    latest.loc[mask, "reviewed_by"] = str(reviewed_by)
+    save_adjustment_requests(latest)
+    return True
+
+
 def apply_delivery_correction(delivery_id, new_qty, reason, updated_by, full_df, delivery_df):
     target = delivery_df[delivery_df["id"].astype(str) == str(delivery_id)]
     if target.empty:
@@ -500,6 +545,17 @@ def apply_delivery_correction(delivery_id, new_qty, reason, updated_by, full_df,
         reason=reason,
         updated_by=updated_by,
     )
+    if int(new_qty) < old_qty:
+        append_discrepancy_log(
+            distributor=distributor,
+            company=company,
+            store=store,
+            product=product,
+            ordered_qty=old_qty,
+            confirmed_qty=int(new_qty),
+            reason=f"Correction: {reason}",
+            corrected_by=updated_by,
+        )
     return True, "კორექცია შესრულდა.", full_df, delivery_df
 
 
@@ -516,6 +572,8 @@ def load_users():
         users_df["role"] = ""
     if "company" not in users_df.columns:
         users_df["company"] = ""
+    if "retail_chain" not in users_df.columns:
+        users_df["retail_chain"] = ""
     if "store" not in users_df.columns:
         users_df["store"] = ""
     if "assigned_branch" not in users_df.columns:
@@ -536,6 +594,7 @@ def load_users():
                     "password_hash": hash_password("admin123"),
                     "role": "Admin",
                     "company": "Global",
+                    "retail_chain": "Global",
                     "store": "",
                     "assigned_branch": "",
                     "commission_rate": 0.0,
@@ -619,6 +678,19 @@ def apply_role_filters(df, sales_df, auth_user, mapping_data):
                 filtered_sales = filtered_sales[filtered_sales["Product"].astype(str).isin(allowed_products)]
         return filtered_df, filtered_sales
 
+    if role in ["Retail_Operator", "Supplier_Operator"]:
+        allowed_stores = set([x for x in str(auth_user.get("allowed_stores", "")).split("|") if x])
+        allowed_products = set(company_products.get(company, set()))
+        if allowed_stores:
+            filtered_df = filtered_df[filtered_df["Store_Name"].astype(str).isin(allowed_stores)]
+            if not filtered_sales.empty:
+                filtered_sales = filtered_sales[filtered_sales["Store"].astype(str).isin(allowed_stores)]
+        if allowed_products:
+            filtered_df = filtered_df[filtered_df["Product_Name"].astype(str).isin(allowed_products)]
+            if not filtered_sales.empty:
+                filtered_sales = filtered_sales[filtered_sales["Product"].astype(str).isin(allowed_products)]
+        return filtered_df, filtered_sales
+
     return filtered_df.iloc[0:0], filtered_sales.iloc[0:0]
 
 
@@ -643,6 +715,9 @@ def get_role_scope(auth_user, mapping_data):
         return {"role": role, "stores": None, "products": set(company_products.get(company, set()))}
     if role == "Company_Operator":
         return {"role": role, "stores": None, "products": set(company_products.get(company, set()))}
+    if role in ["Retail_Operator", "Supplier_Operator"]:
+        stores = set([x for x in str(auth_user.get("allowed_stores", "")).split("|") if x])
+        return {"role": role, "stores": stores if stores else None, "products": set(company_products.get(company, set()))}
     if role == "Distributor":
         return {
             "role": role,
@@ -686,6 +761,8 @@ def get_default_page_for_role(role):
     if role == "Company_Admin":
         return "🤝 დისტრიბუტორების მართვა"
     if role == "Company_Operator":
+        return "🛠 ოპერატორის პანელი"
+    if role in ["Retail_Operator", "Supplier_Operator"]:
         return "🛠 ოპერატორის პანელი"
     if role == "Distributor":
         return "🚚 აუცილებელი მიწოდებები"
@@ -1084,7 +1161,7 @@ if role == "Super_Admin":
     ]
 elif role == "Company_Admin":
     pages = ["🤝 დისტრიბუტორების მართვა", "📈 პროდუქტის ეფექტიანობა"]
-elif role == "Company_Operator":
+elif role in ["Company_Operator", "Retail_Operator", "Supplier_Operator"]:
     pages = ["🛠 ოპერატორის პანელი", "📈 პროდუქტის ეფექტიანობა"]
 elif role == "Store_Manager":
     pages = ["🏠 მაღაზიის პანელი", "🛒 გაყიდვები", "📥 მარაგების მიღება"]
@@ -1599,6 +1676,7 @@ elif page == "📥 მარაგების მიღება":
                             ordered_qty=ordered_qty,
                             confirmed_qty=int(final_qty),
                             reason=reason if reason.strip() else "Unspecified",
+                            corrected_by=str(auth_user.get("username", "")),
                         )
 
                     pending_df.loc[pending_df["id"].astype(str) == pid, "status"] = "confirmed"
@@ -1991,98 +2069,102 @@ elif page == "🤝 დისტრიბუტორების მართვ
 elif page == "🛠 ოპერატორის პანელი":
     st.title("🛠 ოპერატორის პანელი")
     operator_company = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
-
-    st.subheader("Pending Adjustment Request")
-    req_df = load_adjustment_requests()
-    req_df = req_df[
-        (req_df["company"].astype(str) == str(operator_company))
-        & (req_df["status"].astype(str) == "pending")
-    ] if not req_df.empty else req_df
-    if req_df.empty:
-        st.info("მოლოდინში მოთხოვნები არ არის.")
-    else:
-        for _, req in req_df.iterrows():
-            rid = str(req["request_id"])
-            did = str(req["delivery_id"])
-            with st.container(border=True):
-                st.markdown(
-                    f"**ფილიალი:** {req['store']} | **პროდუქტი:** {req['product']} | "
-                    f"**მიმდინარე:** {int(req['current_qty'])} -> **მოთხოვნილი:** {int(req['requested_qty'])}"
-                )
-                st.caption(f"Store Manager: {req['store_manager']} | მიზეზი: {req['reason']}")
-                c1, c2 = st.columns(2)
-                if c1.button("დამტკიცება", key=f"approve_req_{rid}"):
-                    delivery_df = load_delivery_log()
-                    full_df = st.session_state.df.copy()
-                    ok, msg, full_df, delivery_df = apply_delivery_correction(
-                        delivery_id=did,
-                        new_qty=int(req["requested_qty"]),
-                        reason=f"Operator Approved: {req['reason']}",
-                        updated_by=str(auth_user.get("username", "")),
-                        full_df=full_df,
-                        delivery_df=delivery_df,
+    pending_tab, master_tab = st.tabs(["Pending Approvals", "Master Edit"])
+    with pending_tab:
+        st.subheader("Pending Adjustment Request")
+        req_df = load_adjustment_requests()
+        req_df = req_df[
+            (req_df["company"].astype(str) == str(operator_company))
+            & (req_df["status"].astype(str) == "pending")
+        ] if not req_df.empty else req_df
+        if req_df.empty:
+            st.info("მოლოდინში მოთხოვნები არ არის.")
+        else:
+            for _, req in req_df.iterrows():
+                rid = str(req["request_id"])
+                did = str(req["delivery_id"])
+                with st.container(border=True):
+                    st.markdown(
+                        f"**ფილიალი:** {req['store']} | **პროდუქტი:** {req['product']} | "
+                        f"**მიმდინარე:** {int(req['current_qty'])} -> **მოთხოვნილი:** {int(req['requested_qty'])}"
                     )
-                    if ok:
-                        save_data(recalc_metrics(full_df))
-                        st.session_state.df = recalc_metrics(full_df)
-                        save_delivery_log(delivery_df)
-                        req_df.loc[req_df["request_id"].astype(str) == rid, "status"] = "approved"
-                        req_df.loc[req_df["request_id"].astype(str) == rid, "reviewed_by"] = str(auth_user.get("username", ""))
-                        save_adjustment_requests(req_df)
-                        st.success("მოთხოვნა დამტკიცდა და ცვლილება გატარდა.")
-                        st.rerun()
-                    else:
-                        st.error(msg)
-                if c2.button("უარყოფა", key=f"reject_req_{rid}"):
-                    req_df.loc[req_df["request_id"].astype(str) == rid, "status"] = "rejected"
-                    req_df.loc[req_df["request_id"].astype(str) == rid, "reviewed_by"] = str(auth_user.get("username", ""))
-                    save_adjustment_requests(req_df)
-                    st.warning("მოთხოვნა უარყოფილია.")
-                    st.rerun()
-
-    st.divider()
-    st.subheader("Master Edit (Force Update)")
-    delivery_df = load_delivery_log()
-    company_delivery = delivery_df[delivery_df["company"].astype(str) == str(operator_company)] if not delivery_df.empty else delivery_df
-    if company_delivery.empty:
-        st.info("კომპანიის მიწოდების ჩანაწერები არ არის.")
-    else:
-        for _, drow in company_delivery.sort_values("timestamp", ascending=False).head(30).iterrows():
-            did = str(drow["id"])
-            old_qty = int(drow["qty"])
-            product_name = str(drow["product"])
-            store_name = str(drow["store"])
-            with st.container(border=True):
-                st.markdown(f"**{store_name} | {product_name}** — მიმდინარე რაოდენობა: {old_qty}")
-                new_qty = st.number_input("ახალი რაოდენობა", min_value=0, value=old_qty, step=1, key=f"op_qty_{did}")
-                force_reason = st.text_input("მიზეზი", key=f"op_reason_{did}", placeholder="მაგ: Operator correction / Lost")
-                is_lost = st.checkbox("ჩამოწერა (Lost)", key=f"lost_{did}")
-                if st.button("Force Update", key=f"force_{did}"):
-                    if int(new_qty) == old_qty:
-                        st.info("რაოდენობა უცვლელია.")
-                    elif not force_reason.strip():
-                        st.warning("მიუთითეთ მიზეზი.")
-                    else:
-                        if is_lost and int(new_qty) > old_qty:
-                            st.warning("Lost რეჟიმში რაოდენობის გაზრდა შეუძლებელია.")
-                        else:
-                            full_df = st.session_state.df.copy()
-                            ok, msg, full_df, delivery_df = apply_delivery_correction(
-                                delivery_id=did,
-                                new_qty=int(new_qty),
-                                reason=("Lost: " if is_lost else "") + force_reason.strip(),
-                                updated_by=str(auth_user.get("username", "")),
-                                full_df=full_df,
-                                delivery_df=delivery_df,
+                    st.caption(f"Store Manager: {req['store_manager']} | მიზეზი: {req['reason']}")
+                    c1, c2 = st.columns(2)
+                    if c1.button("დამტკიცება", key=f"approve_req_{rid}"):
+                        delivery_df = load_delivery_log()
+                        full_df = st.session_state.df.copy()
+                        ok, msg, full_df, delivery_df = apply_delivery_correction(
+                            delivery_id=did,
+                            new_qty=int(req["requested_qty"]),
+                            reason=f"Operator Approved: {req['reason']}",
+                            updated_by=str(auth_user.get("username", "")),
+                            full_df=full_df,
+                            delivery_df=delivery_df,
+                        )
+                        if ok:
+                            save_data(recalc_metrics(full_df))
+                            st.session_state.df = recalc_metrics(full_df)
+                            save_delivery_log(delivery_df)
+                            update_adjustment_request_status(
+                                request_id=rid,
+                                status="approved",
+                                reviewed_by=str(auth_user.get("username", "")),
                             )
-                            if ok:
-                                save_data(recalc_metrics(full_df))
-                                st.session_state.df = recalc_metrics(full_df)
-                                save_delivery_log(delivery_df)
-                                st.success("Force Update შესრულდა.")
-                                st.rerun()
+                            st.success("მოთხოვნა დამტკიცდა და ცვლილება გატარდა.")
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                    if c2.button("უარყოფა", key=f"reject_req_{rid}"):
+                        update_adjustment_request_status(
+                            request_id=rid,
+                            status="rejected",
+                            reviewed_by=str(auth_user.get("username", "")),
+                        )
+                        st.warning("მოთხოვნა უარყოფილია.")
+                        st.rerun()
+    with master_tab:
+        st.subheader("Master Edit (Force Update)")
+        delivery_df = load_delivery_log()
+        company_delivery = delivery_df[delivery_df["company"].astype(str) == str(operator_company)] if not delivery_df.empty else delivery_df
+        if company_delivery.empty:
+            st.info("კომპანიის მიწოდების ჩანაწერები არ არის.")
+        else:
+            for _, drow in company_delivery.sort_values("timestamp", ascending=False).head(30).iterrows():
+                did = str(drow["id"])
+                old_qty = int(drow["qty"])
+                product_name = str(drow["product"])
+                store_name = str(drow["store"])
+                with st.container(border=True):
+                    st.markdown(f"**{store_name} | {product_name}** — მიმდინარე რაოდენობა: {old_qty}")
+                    new_qty = st.number_input("ახალი რაოდენობა", min_value=0, value=old_qty, step=1, key=f"op_qty_{did}")
+                    force_reason = st.text_input("მიზეზი", key=f"op_reason_{did}", placeholder="მაგ: Operator correction / Lost")
+                    is_lost = st.checkbox("ჩამოწერა (Lost)", key=f"lost_{did}")
+                    if st.button("Force Update", key=f"force_{did}"):
+                        if int(new_qty) == old_qty:
+                            st.info("რაოდენობა უცვლელია.")
+                        elif not force_reason.strip():
+                            st.warning("მიუთითეთ მიზეზი.")
+                        else:
+                            if is_lost and int(new_qty) > old_qty:
+                                st.warning("Lost რეჟიმში რაოდენობის გაზრდა შეუძლებელია.")
                             else:
-                                st.error(msg)
+                                full_df = st.session_state.df.copy()
+                                ok, msg, full_df, delivery_df = apply_delivery_correction(
+                                    delivery_id=did,
+                                    new_qty=int(new_qty),
+                                    reason=("Lost: " if is_lost else "") + force_reason.strip(),
+                                    updated_by=str(auth_user.get("username", "")),
+                                    full_df=full_df,
+                                    delivery_df=delivery_df,
+                                )
+                                if ok:
+                                    save_data(recalc_metrics(full_df))
+                                    st.session_state.df = recalc_metrics(full_df)
+                                    save_delivery_log(delivery_df)
+                                    st.success("Force Update შესრულდა.")
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
 
 elif page in ["🌍 გლობალური ანალიტიკა", "📈 პროდუქტის ეფექტიანობა"]:
     if page == "🌍 გლობალური ანალიტიკა":
