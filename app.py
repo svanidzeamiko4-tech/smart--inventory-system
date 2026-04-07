@@ -1,11 +1,12 @@
 import pandas as pd
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 st.set_page_config(page_title="ERP Smart System", layout="wide")
 FILE_NAME = "Product.csv.txt"
 AUDIT_LOG_FILE = "audit_log.csv"
+SALES_LOG_FILE = "sales_log.csv"
 
 # 1. მონაცემების მართვა
 def ensure_data_structure(df):
@@ -68,6 +69,38 @@ def load_audit_log():
     return pd.DataFrame(columns=["Date", "Product", "Old Stock", "New Stock", "Difference", "Reason", "Cost Price", "Shrinkage_Value"])
 
 
+def append_sales_log(sale_date, store, product, qty, selling_price, cost_price):
+    revenue = float(qty) * float(selling_price)
+    profit = float(qty) * (float(selling_price) - float(cost_price))
+    log_row = {
+        "Date": pd.to_datetime(sale_date).strftime("%Y-%m-%d"),
+        "Store": str(store),
+        "Product": str(product),
+        "Qty": int(qty),
+        "Selling_Price": float(selling_price),
+        "Cost_Price": float(cost_price),
+        "Revenue": revenue,
+        "Profit": profit,
+    }
+    log_df = pd.DataFrame([log_row])
+    write_header = not os.path.exists(SALES_LOG_FILE)
+    log_df.to_csv(SALES_LOG_FILE, mode="a", header=write_header, index=False)
+
+
+def load_sales_log():
+    if os.path.exists(SALES_LOG_FILE):
+        sales_df = pd.read_csv(SALES_LOG_FILE)
+        required_cols = ["Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"]
+        for col in required_cols:
+            if col not in sales_df.columns:
+                sales_df[col] = 0 if col in ["Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"] else ""
+        sales_df["Date"] = pd.to_datetime(sales_df["Date"], errors="coerce")
+        for numeric_col in ["Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"]:
+            sales_df[numeric_col] = pd.to_numeric(sales_df[numeric_col], errors="coerce").fillna(0)
+        return sales_df.dropna(subset=["Date"])
+    return pd.DataFrame(columns=["Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"])
+
+
 def recalc_metrics(df):
     sales_cols = [f"Sales_Day{i}" for i in range(1, 8)]
     for col in sales_cols:
@@ -113,7 +146,14 @@ df["დღე ვადის გასვლამდე"] = (pd.to_datetime(df
 st.sidebar.title("🎛️ მართვის პანელი")
 page = st.sidebar.radio(
     "გადადი გვერდზე:",
-    ["🏠 Dashboard", "📦 Inventory List", "📥 Add New Stock (ზედნადები)", "🔍 Stock Audit (აღწერა)", "📊 Reports"]
+    [
+        "🏠 Dashboard",
+        "📦 Inventory List",
+        "📥 Add New Stock (ზედნადები)",
+        "🔍 Stock Audit (აღწერა)",
+        "📈 Detailed Analytics",
+        "📊 Reports",
+    ]
 )
 
 # --- გვერდი 1: DASHBOARD ---
@@ -177,6 +217,14 @@ elif page == "📦 Inventory List":
         if c7.button("Sell", key=f"sell_{index}", disabled=not can_sell):
             unit_profit = float(row.get("Selling_Price", 0)) - float(row.get("Cost_Price", 0))
             st.session_state.daily_profit += unit_profit
+            append_sales_log(
+                sale_date=datetime.now(),
+                store=row.get("Store_Name", ""),
+                product=row.get("Product_Name", ""),
+                qty=1,
+                selling_price=row.get("Selling_Price", 0),
+                cost_price=row.get("Cost_Price", 0),
+            )
             df.at[index, "Current_Stock"] = max(0, int(row["Current_Stock"]) - 1)
             df = recalc_metrics(df)
             save_data(df)
@@ -268,6 +316,72 @@ elif page == "🔍 Stock Audit (აღწერა)":
                 append_audit_log(product_name, old_stock, updated_stock, difference, reason, cost_price)
                 st.success("ინვენტარის ცვლილება შენახულია და audit log განახლდა.")
                 st.rerun()
+
+elif page == "📈 Detailed Analytics":
+    st.title("📈 Detailed Analytics")
+    st.caption("Analyze revenue, profit, and sales volume by period and branch.")
+    sales_df = load_sales_log()
+
+    if "analytics_start" not in st.session_state:
+        st.session_state.analytics_start = (datetime.now().date() - timedelta(days=6))
+    if "analytics_end" not in st.session_state:
+        st.session_state.analytics_end = datetime.now().date()
+
+    q1, q2, q3 = st.columns(3)
+    if q1.button("Last 7 Days", use_container_width=True):
+        st.session_state.analytics_start = datetime.now().date() - timedelta(days=6)
+        st.session_state.analytics_end = datetime.now().date()
+    if q2.button("Last 15 Days", use_container_width=True):
+        st.session_state.analytics_start = datetime.now().date() - timedelta(days=14)
+        st.session_state.analytics_end = datetime.now().date()
+    if q3.button("Last 30 Days", use_container_width=True):
+        st.session_state.analytics_start = datetime.now().date() - timedelta(days=29)
+        st.session_state.analytics_end = datetime.now().date()
+
+    f1, f2 = st.columns([2, 1])
+    selected_range = f1.date_input(
+        "Date Range",
+        value=(st.session_state.analytics_start, st.session_state.analytics_end),
+    )
+    if isinstance(selected_range, tuple) and len(selected_range) == 2:
+        start_date, end_date = selected_range
+        st.session_state.analytics_start = start_date
+        st.session_state.analytics_end = end_date
+    else:
+        start_date = st.session_state.analytics_start
+        end_date = st.session_state.analytics_end
+
+    store_options = ["All Branches"] + sorted(df["Store_Name"].astype(str).unique().tolist()) if not df.empty else ["All Branches"]
+    selected_store = f2.selectbox("Store Filter", store_options)
+
+    if sales_df.empty:
+        st.info("No sales data available yet. Sell items from Inventory List to populate analytics.")
+    else:
+        sales_df["DateOnly"] = sales_df["Date"].dt.date
+        filtered_sales = sales_df[
+            (sales_df["DateOnly"] >= start_date) &
+            (sales_df["DateOnly"] <= end_date)
+        ]
+        if selected_store != "All Branches":
+            filtered_sales = filtered_sales[filtered_sales["Store"] == selected_store]
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("💵 Total Revenue", f"{filtered_sales['Revenue'].sum():.2f}")
+        m2.metric("📈 Total Profit", f"{filtered_sales['Profit'].sum():.2f}")
+        m3.metric("🧾 Items Sold", int(filtered_sales["Qty"].sum()))
+
+        if filtered_sales.empty:
+            st.warning("No sales found for the selected date range and store.")
+        else:
+            st.divider()
+            st.subheader("Daily Sales Trend")
+            daily_sales = filtered_sales.groupby("DateOnly", as_index=False)["Revenue"].sum()
+            daily_sales = daily_sales.rename(columns={"DateOnly": "Date"})
+            st.line_chart(daily_sales.set_index("Date")["Revenue"])
+
+            st.subheader("Sales by Store")
+            sales_by_store = filtered_sales.groupby("Store", as_index=False)["Revenue"].sum()
+            st.bar_chart(sales_by_store.set_index("Store")["Revenue"])
 
 elif page == "📊 Reports":
     st.title("📊 Reports")
