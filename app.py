@@ -111,6 +111,41 @@ def ensure_auth_files():
 def load_users():
     ensure_auth_files()
     users_df = pd.read_csv(USERS_FILE, dtype=str).fillna("")
+
+    # Safety fallback: always guarantee default admin access.
+    if "username" not in users_df.columns:
+        users_df["username"] = ""
+    if "password_hash" not in users_df.columns:
+        users_df["password_hash"] = ""
+    if "role" not in users_df.columns:
+        users_df["role"] = ""
+    if "company" not in users_df.columns:
+        users_df["company"] = ""
+    if "store" not in users_df.columns:
+        users_df["store"] = ""
+    if "allowed_stores" not in users_df.columns:
+        users_df["allowed_stores"] = ""
+    if "allowed_products" not in users_df.columns:
+        users_df["allowed_products"] = ""
+
+    admin_exists = (users_df["username"].astype(str) == "admin").any()
+    if not admin_exists:
+        admin_row = pd.DataFrame(
+            [
+                {
+                    "username": "admin",
+                    "password_hash": hash_password("admin123"),
+                    "role": "Admin",
+                    "company": "Global",
+                    "store": "",
+                    "allowed_stores": "",
+                    "allowed_products": "",
+                }
+            ]
+        )
+        users_df = pd.concat([users_df, admin_row], ignore_index=True)
+        users_df.to_csv(USERS_FILE, index=False)
+
     users = users_df.to_dict("records")
     for user in users:
         # Backward compatibility if old Admin role exists
