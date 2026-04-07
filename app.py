@@ -16,6 +16,8 @@ DISTRIBUTOR_MAP_FILE = "distributor_mapping.json"
 MAPPING_FILE = "mapping.csv"
 BALANCE_FILE = "balances.csv"
 DELIVERY_LOG_FILE = "deliveries_log.csv"
+PENDING_DELIVERY_FILE = "pending_deliveries.csv"
+DISCREPANCY_LOG_FILE = "discrepancy_log.csv"
 STORE_NAME_MAP = {
     "Gldani_Branch": "გლდანის ფილიალი",
     "Vake_Branch": "ვაკის ფილიალი",
@@ -159,6 +161,37 @@ def ensure_auth_files():
             ]
         ).to_csv(DELIVERY_LOG_FILE, index=False)
 
+    if not os.path.exists(PENDING_DELIVERY_FILE):
+        pd.DataFrame(
+            columns=[
+                "id",
+                "timestamp",
+                "date",
+                "username",
+                "company",
+                "store",
+                "product",
+                "ordered_qty",
+                "unit_price",
+                "status",
+            ]
+        ).to_csv(PENDING_DELIVERY_FILE, index=False)
+
+    if not os.path.exists(DISCREPANCY_LOG_FILE):
+        pd.DataFrame(
+            columns=[
+                "timestamp",
+                "distributor",
+                "company",
+                "store",
+                "product",
+                "ordered_qty",
+                "confirmed_qty",
+                "difference",
+                "reason",
+            ]
+        ).to_csv(DISCREPANCY_LOG_FILE, index=False)
+
 
 def load_mapping():
     ensure_auth_files()
@@ -214,6 +247,76 @@ def append_delivery_log(username, company, store, product, qty, unit_price):
         header=not os.path.exists(DELIVERY_LOG_FILE) or os.path.getsize(DELIVERY_LOG_FILE) == 0,
         index=False,
     )
+
+
+def append_pending_delivery(username, company, store, product, ordered_qty, unit_price):
+    ts = datetime.now()
+    row = {
+        "id": f"{int(ts.timestamp() * 1000)}_{random.randint(1000, 9999)}",
+        "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": ts.strftime("%Y-%m-%d"),
+        "username": str(username),
+        "company": str(company),
+        "store": str(store),
+        "product": str(product),
+        "ordered_qty": int(ordered_qty),
+        "unit_price": float(unit_price),
+        "status": "pending",
+    }
+    pd.DataFrame([row]).to_csv(
+        PENDING_DELIVERY_FILE,
+        mode="a",
+        header=not os.path.exists(PENDING_DELIVERY_FILE) or os.path.getsize(PENDING_DELIVERY_FILE) == 0,
+        index=False,
+    )
+
+
+def load_pending_deliveries():
+    ensure_auth_files()
+    if not os.path.exists(PENDING_DELIVERY_FILE):
+        return pd.DataFrame(columns=["id", "timestamp", "date", "username", "company", "store", "product", "ordered_qty", "unit_price", "status"])
+    pdf = pd.read_csv(PENDING_DELIVERY_FILE, dtype=str).fillna("")
+    if pdf.empty:
+        return pdf
+    pdf["ordered_qty"] = pd.to_numeric(pdf["ordered_qty"], errors="coerce").fillna(0).astype(int)
+    pdf["unit_price"] = pd.to_numeric(pdf["unit_price"], errors="coerce").fillna(0.0)
+    return pdf
+
+
+def save_pending_deliveries(pdf):
+    pdf.to_csv(PENDING_DELIVERY_FILE, index=False)
+
+
+def append_discrepancy_log(distributor, company, store, product, ordered_qty, confirmed_qty, reason):
+    diff = int(ordered_qty) - int(confirmed_qty)
+    row = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "distributor": str(distributor),
+        "company": str(company),
+        "store": str(store),
+        "product": str(product),
+        "ordered_qty": int(ordered_qty),
+        "confirmed_qty": int(confirmed_qty),
+        "difference": int(diff),
+        "reason": str(reason),
+    }
+    pd.DataFrame([row]).to_csv(
+        DISCREPANCY_LOG_FILE,
+        mode="a",
+        header=not os.path.exists(DISCREPANCY_LOG_FILE) or os.path.getsize(DISCREPANCY_LOG_FILE) == 0,
+        index=False,
+    )
+
+
+def load_discrepancy_log():
+    ensure_auth_files()
+    if not os.path.exists(DISCREPANCY_LOG_FILE):
+        return pd.DataFrame(columns=["timestamp", "distributor", "company", "store", "product", "ordered_qty", "confirmed_qty", "difference", "reason"])
+    dlog = pd.read_csv(DISCREPANCY_LOG_FILE)
+    if dlog.empty:
+        return dlog
+    dlog["difference"] = pd.to_numeric(dlog["difference"], errors="coerce").fillna(0)
+    return dlog
 
 
 def load_delivery_log():
@@ -873,6 +976,19 @@ if page == "🏢 კომპანიის მართვა":
         st.success(f"{selected_user} მიბმულია ფილიალზე: {selected_branch}")
         st.rerun()
 
+    st.divider()
+    st.subheader("დაზიანება/დანაკარგის მონიტორინგი დისტრიბუტორების მიხედვით")
+    discrepancy_df = load_discrepancy_log()
+    if discrepancy_df.empty:
+        st.info("დანაკარგის ჩანაწერები ჯერ არ არსებობს.")
+    else:
+        top_distributors = (
+            discrepancy_df.groupby("distributor", as_index=False)["difference"].sum()
+            .sort_values("difference", ascending=False)
+            .rename(columns={"distributor": "დისტრიბუტორი", "difference": "ჯამური დანაკარგი"})
+        )
+        st.dataframe(top_distributors, use_container_width=True)
+
     zero_stock = df[df["Current_Stock"] <= 0]
     expiring_soon = df[df["დღე ვადის გასვლამდე"] <= 3]
 
@@ -1060,15 +1176,15 @@ elif page == "📍 ვიზიტები":
                             else {}
                         )
                         for item in confirmed:
-                            append_delivery_log(
+                            append_pending_delivery(
                                 username=auth_user.get("username", ""),
                                 company=user_company,
                                 store=selected_store,
                                 product=item["product"],
-                                qty=item["qty"],
+                                ordered_qty=item["qty"],
                                 unit_price=float(price_map.get(item["product"], 0.0)),
                             )
-                        st.success(f"{selected_store}-ისთვის შეკვეთა მომზადდა ({len(confirmed)} პროდუქტი).")
+                        st.success(f"{selected_store}-ისთვის შეკვეთა გადაიგზავნა დასადასტურებლად ({len(confirmed)} პროდუქტი).")
                         st.rerun()
 
 elif page == "🚚 აუცილებელი მიწოდებები":
@@ -1161,37 +1277,103 @@ elif page == "📥 მარაგების მიღება":
     st.title("📥 მარაგების მიღება")
     assigned_branch = auth_user.get("assigned_branch", "") or auth_user.get("store", "")
     st.caption(f"ფილიალი: {assigned_branch}")
-    with st.form("store_receive_stock_form"):
-        f_name = st.text_input("პროდუქტი")
-        f_qty = st.number_input("რაოდენობა", min_value=1, value=1, step=1)
-        f_cost_price = st.number_input("თვითღირებულება", min_value=0.0, format="%.2f")
-        f_selling_price = st.number_input("გასაყიდი ფასი", min_value=0.0, format="%.2f")
-        f_expiry = st.date_input("ვადა")
-        receive_submitted = st.form_submit_button("შენახვა")
-    if receive_submitted:
-        full_df = st.session_state.df.copy()
-        new_row = {
-            "Store_Name": assigned_branch,
-            "Product_Name": f_name,
-            "Current_Stock": int(f_qty),
-            "Cost_Price": float(f_cost_price),
-            "Selling_Price": float(f_selling_price),
-            "Price": float(f_selling_price),
-            "Sales_Day1": 0,
-            "Sales_Day2": 0,
-            "Sales_Day3": 0,
-            "Sales_Day4": 0,
-            "Sales_Day5": 0,
-            "Sales_Day6": 0,
-            "Sales_Day7": 0,
-            "Expiry_Date": pd.to_datetime(f_expiry),
-        }
-        full_df = pd.concat([full_df, pd.DataFrame([new_row])], ignore_index=True)
-        full_df = recalc_metrics(full_df)
-        save_data(full_df)
-        st.session_state.df = full_df
-        st.success("მარაგი მიღებულია.")
-        st.rerun()
+    pending_df = load_pending_deliveries()
+    branch_pending = pending_df[
+        (pending_df["store"].astype(str) == str(assigned_branch))
+        & (pending_df["status"].astype(str) == "pending")
+    ] if not pending_df.empty else pending_df
+
+    if branch_pending.empty:
+        st.info("დასადასტურებელი მიწოდება არ არის.")
+    else:
+        st.subheader("დასადასტურებელი მიწოდებები")
+        for _, p in branch_pending.iterrows():
+            pid = str(p["id"])
+            product_name = str(p["product"])
+            ordered_qty = int(p["ordered_qty"])
+            distributor_name = str(p["username"])
+            with st.container(border=True):
+                st.markdown(f"**პროდუქტი:** {product_name} | **შეკვეთილი რაოდენობა:** {ordered_qty}")
+                st.caption(f"დისტრიბუტორი: {distributor_name}")
+                final_qty = st.number_input(
+                    f"მიღებული რაოდენობა ({product_name})",
+                    min_value=0,
+                    value=ordered_qty,
+                    step=1,
+                    key=f"confirm_qty_{pid}",
+                )
+                reason = st.text_input(
+                    "კომენტარი / მიზეზი (თუ მიღებული რაოდენობა ნაკლებია)",
+                    key=f"reason_{pid}",
+                    placeholder="მაგ: Damaged / Missing",
+                )
+                if st.button("მიღების დადასტურება", key=f"confirm_btn_{pid}"):
+                    full_df = st.session_state.df.copy()
+                    mask = (
+                        (full_df["Store_Name"].astype(str) == str(assigned_branch))
+                        & (full_df["Product_Name"].astype(str) == str(product_name))
+                    )
+                    if mask.any():
+                        first_idx = full_df[mask].index[0]
+                        full_df.at[first_idx, "Current_Stock"] = int(full_df.at[first_idx, "Current_Stock"]) + int(final_qty)
+                    else:
+                        # if product row doesn't exist in branch, create minimal row
+                        full_df = pd.concat(
+                            [
+                                full_df,
+                                pd.DataFrame(
+                                    [
+                                        {
+                                            "Store_Name": assigned_branch,
+                                            "Product_Name": product_name,
+                                            "Current_Stock": int(final_qty),
+                                            "Cost_Price": 0.0,
+                                            "Selling_Price": float(p["unit_price"]),
+                                            "Price": float(p["unit_price"]),
+                                            "Sales_Day1": 0,
+                                            "Sales_Day2": 0,
+                                            "Sales_Day3": 0,
+                                            "Sales_Day4": 0,
+                                            "Sales_Day5": 0,
+                                            "Sales_Day6": 0,
+                                            "Sales_Day7": 0,
+                                            "Expiry_Date": pd.to_datetime(datetime.now().date() + timedelta(days=30)),
+                                        }
+                                    ]
+                                ),
+                            ],
+                            ignore_index=True,
+                        )
+
+                    full_df = recalc_metrics(full_df)
+                    save_data(full_df)
+                    st.session_state.df = full_df
+
+                    # Commission/sales are based on FINAL confirmed quantity only.
+                    append_delivery_log(
+                        username=distributor_name,
+                        company=str(p["company"]),
+                        store=assigned_branch,
+                        product=product_name,
+                        qty=int(final_qty),
+                        unit_price=float(p["unit_price"]),
+                    )
+
+                    if int(final_qty) < ordered_qty:
+                        append_discrepancy_log(
+                            distributor=distributor_name,
+                            company=str(p["company"]),
+                            store=assigned_branch,
+                            product=product_name,
+                            ordered_qty=ordered_qty,
+                            confirmed_qty=int(final_qty),
+                            reason=reason if reason.strip() else "Unspecified",
+                        )
+
+                    pending_df.loc[pending_df["id"].astype(str) == pid, "status"] = "confirmed"
+                    save_pending_deliveries(pending_df)
+                    st.success("მიღება დადასტურდა და მარაგი განახლდა.")
+                    st.rerun()
 
 elif page == "📦 პროდუქციის სია":
     st.title("📦 პროდუქციის სია")
