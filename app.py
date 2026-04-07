@@ -21,6 +21,7 @@ PENDING_DELIVERY_FILE = "pending_deliveries.csv"
 DISCREPANCY_LOG_FILE = "discrepancy_log.csv"
 CORRECTION_LOG_FILE = "correction_log.csv"
 ADJUSTMENT_REQUEST_FILE = "adjustment_requests.csv"
+TRUCK_STOCK_FILE = "truck_stock.csv"
 STORE_NAME_MAP = {
     "Gldani_Branch": "გლდანის ფილიალი",
     "Vake_Branch": "ვაკის ფილიალი",
@@ -341,6 +342,9 @@ def ensure_auth_files():
             ]
         ).to_csv(ADJUSTMENT_REQUEST_FILE, index=False)
 
+    if not os.path.exists(TRUCK_STOCK_FILE):
+        pd.DataFrame(columns=["username", "product", "qty", "updated_at"]).to_csv(TRUCK_STOCK_FILE, index=False)
+
 
 def load_mapping():
     ensure_auth_files()
@@ -618,6 +622,58 @@ def update_adjustment_request_status(request_id, status, reviewed_by):
     latest.loc[mask, "reviewed_by"] = str(reviewed_by)
     save_adjustment_requests(latest)
     return True
+
+
+def load_truck_stock():
+    ensure_auth_files()
+    if not os.path.exists(TRUCK_STOCK_FILE):
+        return pd.DataFrame(columns=["username", "product", "qty", "updated_at"])
+    tdf = pd.read_csv(TRUCK_STOCK_FILE, dtype=str).fillna("")
+    if tdf.empty:
+        return tdf
+    tdf["qty"] = pd.to_numeric(tdf["qty"], errors="coerce").fillna(0).astype(int)
+    return tdf
+
+
+def save_truck_stock(tdf):
+    safe_write_csv(tdf, TRUCK_STOCK_FILE)
+
+
+def get_truck_qty(username, product):
+    tdf = load_truck_stock()
+    if tdf.empty:
+        return 100
+    mask = (
+        (tdf["username"].astype(str) == str(username))
+        & (tdf["product"].astype(str) == str(product))
+    )
+    if not mask.any():
+        return 100
+    return int(pd.to_numeric(tdf.loc[mask, "qty"], errors="coerce").fillna(0).iloc[0])
+
+
+def set_truck_qty(username, product, qty):
+    tdf = load_truck_stock()
+    qty = max(0, int(float(qty)))
+    now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if tdf.empty:
+        tdf = pd.DataFrame([{"username": str(username), "product": str(product), "qty": qty, "updated_at": now_s}])
+        save_truck_stock(tdf)
+        return
+    mask = (
+        (tdf["username"].astype(str) == str(username))
+        & (tdf["product"].astype(str) == str(product))
+    )
+    if mask.any():
+        idx = tdf[mask].index[0]
+        tdf.at[idx, "qty"] = qty
+        tdf.at[idx, "updated_at"] = now_s
+    else:
+        tdf = pd.concat(
+            [tdf, pd.DataFrame([{"username": str(username), "product": str(product), "qty": qty, "updated_at": now_s}])],
+            ignore_index=True,
+        )
+    save_truck_stock(tdf)
 
 
 def apply_delivery_correction(delivery_id, new_qty, reason, updated_by, full_df, delivery_df):
@@ -937,6 +993,10 @@ def ensure_product_row(df, store_name, product_name, qty, cost_price, selling_pr
     for col in ["Cost_Price", "Selling_Price", "Price", "Current_Stock"]:
         if col not in df.columns:
             df[col] = 0
+    df["Cost_Price"] = pd.to_numeric(df["Cost_Price"], errors="coerce").fillna(0.0)
+    df["Selling_Price"] = pd.to_numeric(df["Selling_Price"], errors="coerce").fillna(0.0)
+    df["Price"] = pd.to_numeric(df["Price"], errors="coerce").fillna(0.0)
+    df["Current_Stock"] = pd.to_numeric(df["Current_Stock"], errors="coerce").fillna(0)
 
     # Robust sync: match by normalized store/product to avoid type/text mismatches.
     mask = (
@@ -1206,6 +1266,47 @@ def get_restock_recommendation_qty(sales_df, product_name, store_name, current_s
     avg_daily_qty, weekly_need = get_weekly_demand_stats(sales_df, product_name, store_name)
     needed_qty = max(0, int(math.ceil(weekly_need - float(current_stock))))
     return avg_daily_qty, needed_qty
+
+
+def get_live_store_stock(store_name, product_name):
+    live_df = get_products()
+    if live_df.empty:
+        return 0
+    mask = (
+        (live_df["Store_Name"].astype(str).str.strip() == str(store_name).strip())
+        & (live_df["Product_Name"].astype(str).str.strip() == str(product_name).strip())
+    )
+    if not mask.any():
+        return 0
+    return int(pd.to_numeric(live_df.loc[mask, "Current_Stock"], errors="coerce").fillna(0).iloc[0])
+
+
+def get_distributor_recommended_order(sales_df, store_name, product_name, live_stock):
+    avg_daily, needed = get_restock_recommendation_qty(sales_df, product_name, store_name, live_stock)
+    if live_stock < 10:
+        return max(40, needed), avg_daily
+    return max(needed, 0), avg_daily
+
+
+def get_yesterday_sales_qty(sales_df, store_name, product_name):
+    if sales_df is None or sales_df.empty:
+        return 0
+    target_day = datetime.now().date() - timedelta(days=1)
+    sdf = sales_df.copy()
+    if "Timestamp" in sdf.columns:
+        day_col = sdf["Timestamp"].dt.date
+    elif "timestamp" in sdf.columns:
+        day_col = pd.to_datetime(sdf["timestamp"], errors="coerce").dt.date
+    else:
+        return 0
+    mask = (
+        (day_col == target_day)
+        & (sdf["Store"].astype(str) == str(store_name))
+        & (sdf["Product"].astype(str) == str(product_name))
+    )
+    if not mask.any():
+        return 0
+    return int(pd.to_numeric(sdf.loc[mask, "Qty"], errors="coerce").fillna(0).sum())
 
 
 def compute_branch_performance(sales_df):
@@ -1765,13 +1866,23 @@ elif page == "🚚 აუცილებელი მიწოდებები
                         row_items = []
                         for i, (_, item) in enumerate(store_items.iterrows()):
                             product_name = str(item["Product_Name"])
-                            current_stock = int(item.get("Current_Stock", 0))
-                            _, rec_qty = get_restock_recommendation_qty(
-                                sales_df_all, product_name, active_store, current_stock
+                            live_stock = get_live_store_stock(active_store, product_name)
+                            rec_qty, avg_daily = get_distributor_recommended_order(
+                                sales_df_all, active_store, product_name, live_stock
                             )
+                            yesterday_sales = get_yesterday_sales_qty(sales_df_all, active_store, product_name)
+                            truck_qty = get_truck_qty(auth_user.get("username", ""), product_name)
                             c1, c2 = st.columns([2, 1])
+                            if live_stock < 10:
+                                c1.error(f"🔴 {product_name} — Low Stock")
+                            else:
+                                c1.markdown(f"**{product_name}**")
+                            c1.caption(f"🛒 მაღაზიის ნაშთი: {live_stock}")
+                            c1.caption(f"📈 გუშინდელი გაყიდვა: {yesterday_sales}")
+                            c1.caption(f"შემოთავაზებული რაოდენობა: {rec_qty} | საშუალო დღიური გაყიდვა: {avg_daily:.1f}")
+                            c1.caption(f"🚚 ბორტზე ხელმისაწვდომი: {truck_qty}")
                             delivered_qty = c1.number_input(
-                                f"{product_name} — მიწოდებული რაოდენობა",
+                                f"{product_name} — მიწოდებული რაოდენობა (ხელით შესაცვლელი)",
                                 min_value=0,
                                 value=max(0, int(rec_qty)),
                                 step=1,
@@ -1804,6 +1915,12 @@ elif page == "🚚 აუცილებელი მიწოდებები
                                 qty_val = int(float(r.get("qty", 0) or 0))
                                 unit_price_val = float(r.get("unit_price", 0.0) or 0.0)
                                 issue_val = str(r.get("issue", "") or "")
+                                current_truck = get_truck_qty(auth_user.get("username", ""), r["product"])
+                                if qty_val > current_truck:
+                                    st.warning(f"{r['product']}: ბორტზე მხოლოდ {current_truck} ერთეულია. მიწოდება შეზღუდდა.")
+                                    qty_val = current_truck
+                                if qty_val <= 0:
+                                    continue
                                 full_df = ensure_product_row(
                                     full_df,
                                     active_store,
@@ -1812,6 +1929,7 @@ elif page == "🚚 აუცილებელი მიწოდებები
                                     0.0,
                                     unit_price_val,
                                 )
+                                set_truck_qty(auth_user.get("username", ""), r["product"], current_truck - qty_val)
                                 append_delivery_log(
                                     username=auth_user.get("username", ""),
                                     company=user_company,
@@ -1839,18 +1957,21 @@ elif page == "🚚 აუცილებელი მიწოდებები
                             st.rerun()
 
     with stock_tab:
-        my_all_deliveries = delivery_df[delivery_df["username"].astype(str) == str(auth_user.get("username", ""))] if not delivery_df.empty else delivery_df
-        if my_all_deliveries.empty:
+        truck_df = load_truck_stock()
+        truck_df = truck_df[truck_df["username"].astype(str) == str(auth_user.get("username", ""))] if not truck_df.empty else truck_df
+        if truck_df.empty:
             st.info("ბორტის ნაშთისთვის ჩანაწერები არ არის.")
         else:
             delivered_by_product = (
-                my_all_deliveries.groupby("product", as_index=False)["qty"].sum()
+                delivery_df[delivery_df["username"].astype(str) == str(auth_user.get("username", ""))]
+                .groupby("product", as_index=False)["qty"].sum()
                 .rename(columns={"product": "პროდუქტი", "qty": "ჯამურად მიწოდებული"})
+                if not delivery_df.empty
+                else pd.DataFrame(columns=["პროდუქტი", "ჯამურად მიწოდებული"])
             )
-            delivered_by_product["დილის დატვირთვა (სიმულაცია)"] = delivered_by_product["ჯამურად მიწოდებული"] + 20
-            delivered_by_product["ბორტის ნაშთი"] = (
-                delivered_by_product["დილის დატვირთვა (სიმულაცია)"] - delivered_by_product["ჯამურად მიწოდებული"]
-            ).clip(lower=0)
+            truck_view = truck_df.rename(columns={"product": "პროდუქტი", "qty": "ბორტის ნაშთი"})[["პროდუქტი", "ბორტის ნაშთი"]]
+            delivered_by_product = delivered_by_product.merge(truck_view, on="პროდუქტი", how="outer").fillna(0)
+            delivered_by_product["დილის დატვირთვა (სიმულაცია)"] = delivered_by_product["ჯამურად მიწოდებული"] + delivered_by_product["ბორტის ნაშთი"]
             st.dataframe(
                 delivered_by_product[["პროდუქტი", "დილის დატვირთვა (სიმულაცია)", "ჯამურად მიწოდებული", "ბორტის ნაშთი"]],
                 use_container_width=True,
