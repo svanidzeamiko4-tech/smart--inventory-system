@@ -4,11 +4,14 @@ from datetime import datetime, timedelta
 import os
 import random
 import math
+import json
 
 st.set_page_config(page_title="ERP Smart System", layout="wide")
 FILE_NAME = "Product.csv.txt"
 AUDIT_LOG_FILE = "audit_log.csv"
 SALES_LOG_FILE = "sales_log.csv"
+USERS_FILE = "auth_users.json"
+DISTRIBUTOR_MAP_FILE = "distributor_mapping.json"
 STORE_NAME_MAP = {
     "Gldani_Branch": "გლდანის ფილიალი",
     "Vake_Branch": "ვაკის ფილიალი",
@@ -42,6 +45,81 @@ def load_data():
         df = ensure_data_structure(df)
         return df
     return pd.DataFrame()
+
+
+def ensure_auth_files():
+    if not os.path.exists(USERS_FILE):
+        default_users = [
+            {"username": "admin", "password": "admin123", "role": "Admin"},
+            {"username": "manager_gldani", "password": "manager123", "role": "Store_Manager", "store": "გლდანის ფილიალი"},
+            {"username": "distributor_a", "password": "dist123", "role": "Distributor", "company": "Supplier_A"},
+        ]
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(default_users, f, ensure_ascii=False, indent=2)
+
+    if not os.path.exists(DISTRIBUTOR_MAP_FILE):
+        default_map = {
+            "distributor_a": {
+                "company": "Supplier_A",
+                "stores": ["გლდანის ფილიალი", "ვაკის ფილიალი"],
+                "products": ["Apple", "Banana", "Milk", "Bread", "Rice"]
+            }
+        }
+        with open(DISTRIBUTOR_MAP_FILE, "w", encoding="utf-8") as f:
+            json.dump(default_map, f, ensure_ascii=False, indent=2)
+
+
+def load_users():
+    ensure_auth_files()
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_distributor_map():
+    ensure_auth_files()
+    with open(DISTRIBUTOR_MAP_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def authenticate_user(username, password):
+    users = load_users()
+    for user in users:
+        if user.get("username") == username and user.get("password") == password:
+            return user
+    return None
+
+
+def apply_role_filters(df, sales_df, auth_user, distributor_map):
+    role = auth_user.get("role", "")
+    filtered_df = df.copy()
+    filtered_sales = sales_df.copy()
+
+    if role == "Admin":
+        return filtered_df, filtered_sales
+
+    if role == "Store_Manager":
+        store_name = auth_user.get("store", "")
+        filtered_df = filtered_df[filtered_df["Store_Name"].astype(str) == str(store_name)]
+        if not filtered_sales.empty:
+            filtered_sales = filtered_sales[filtered_sales["Store"].astype(str) == str(store_name)]
+        return filtered_df, filtered_sales
+
+    if role == "Distributor":
+        rule = distributor_map.get(auth_user.get("username", ""), {})
+        allowed_stores = set(rule.get("stores", []))
+        allowed_products = set(rule.get("products", []))
+        filtered_df = filtered_df[
+            filtered_df["Store_Name"].astype(str).isin(allowed_stores)
+            & filtered_df["Product_Name"].astype(str).isin(allowed_products)
+        ]
+        if not filtered_sales.empty:
+            filtered_sales = filtered_sales[
+                filtered_sales["Store"].astype(str).isin(allowed_stores)
+                & filtered_sales["Product"].astype(str).isin(allowed_products)
+            ]
+        return filtered_df, filtered_sales
+
+    return filtered_df.iloc[0:0], filtered_sales.iloc[0:0]
 
 
 def save_data(df):
@@ -356,6 +434,25 @@ def recalc_metrics(df):
 if 'df' not in st.session_state:
     st.session_state.df = load_data()
 
+if "auth_user" not in st.session_state:
+    st.session_state.auth_user = None
+
+if st.session_state.auth_user is None:
+    st.title("🔐 ავტორიზაცია")
+    st.caption("შეიყვანე მომხმარებლის სახელი და პაროლი სისტემაში შესასვლელად.")
+    with st.form("login_form"):
+        username = st.text_input("მომხმარებელი")
+        password = st.text_input("პაროლი", type="password")
+        login_submitted = st.form_submit_button("შესვლა")
+    if login_submitted:
+        user = authenticate_user(username.strip(), password.strip())
+        if user:
+            st.session_state.auth_user = user
+            st.rerun()
+        else:
+            st.error("არასწორი მომხმარებელი ან პაროლი.")
+    st.stop()
+
 # Profit tracker resets automatically each day.
 today_str = datetime.now().strftime("%Y-%m-%d")
 if 'profit_date' not in st.session_state:
@@ -370,7 +467,11 @@ if st.session_state.profit_date != today_str:
 st.session_state.df = ensure_data_structure(st.session_state.df)
 st.session_state.df = recalc_metrics(st.session_state.df)
 
-df = st.session_state.df
+auth_user = st.session_state.auth_user
+sales_df_all = load_sales_log()
+distributor_map = load_distributor_map()
+master_df = st.session_state.df
+df, sales_df_all = apply_role_filters(master_df, sales_df_all, auth_user, distributor_map)
 
 # 2. ანალიტიკური გათვლები
 sales_cols = [f"Sales_Day{i}" for i in range(1, 8)]
@@ -383,14 +484,22 @@ df["დღე ვადის გასვლამდე"] = (pd.to_datetime(df
 
 # --- მთავარი გვერდითა მენიუ ---
 st.sidebar.title("🎛️ მართვის პანელი")
+st.sidebar.caption(
+    f"მომხმარებელი: {auth_user.get('username')} | როლი: {auth_user.get('role')}"
+)
+if st.sidebar.button("გასვლა", use_container_width=True):
+    st.session_state.auth_user = None
+    st.rerun()
+
 pages = [
     "🏠 მთავარი პანელი",
     "📦 პროდუქციის სია",
     "📥 საქონლის მიღება",
     "🔍 ინვენტარიზაცია",
-    "📈 დეტალური ანალიტიკა",
     "📊 ანგარიშები",
 ]
+if auth_user.get("role") == "Admin":
+    pages.insert(4, "📈 დეტალური ანალიტიკა")
 # Stable navigation: keep radio state separate from programmatic redirects.
 if "current_page" not in st.session_state or st.session_state.current_page not in pages:
     st.session_state.current_page = pages[0]
@@ -405,22 +514,23 @@ page = st.sidebar.radio(
 )
 st.session_state.current_page = page
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("🚀 საჩვენებელი რეჟიმი")
-if st.sidebar.button("10,000 გაყიდვის გენერირება (სიმულაცია)", use_container_width=True):
-    st.session_state.df = generate_month_sales_simulation(st.session_state.df, transactions=10000)
-    st.session_state.simulation_stress_mode = True
-    st.session_state.daily_profit = 0.0
-    st.session_state.profit_date = datetime.now().strftime("%Y-%m-%d")
-    st.rerun()
+if auth_user.get("role") == "Admin":
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🚀 საჩვენებელი რეჟიმი")
+    if st.sidebar.button("10,000 გაყიდვის გენერირება (სიმულაცია)", use_container_width=True):
+        st.session_state.df = generate_month_sales_simulation(st.session_state.df, transactions=10000)
+        st.session_state.simulation_stress_mode = True
+        st.session_state.daily_profit = 0.0
+        st.session_state.profit_date = datetime.now().strftime("%Y-%m-%d")
+        st.rerun()
 
-if st.sidebar.button("🗑️ სისტემის გასუფთავება", use_container_width=True):
-    reset_system_data()
-    st.session_state.simulation_stress_mode = False
-    st.session_state.df = pd.DataFrame()
-    st.session_state.daily_profit = 0.0
-    st.session_state.profit_date = datetime.now().strftime("%Y-%m-%d")
-    st.rerun()
+    if st.sidebar.button("🗑️ სისტემის გასუფთავება", use_container_width=True):
+        reset_system_data()
+        st.session_state.simulation_stress_mode = False
+        st.session_state.df = pd.DataFrame()
+        st.session_state.daily_profit = 0.0
+        st.session_state.profit_date = datetime.now().strftime("%Y-%m-%d")
+        st.rerun()
 
 # --- გვერდი 1: DASHBOARD ---
 if page == "🏠 მთავარი პანელი":
@@ -453,7 +563,7 @@ if page == "🏠 მთავარი პანელი":
 
     st.divider()
     st.subheader("გასათვალისწინებელი შეტყობინებები")
-    sales_df = load_sales_log()
+    sales_df = sales_df_all.copy()
     low_stock_alerts = get_low_stock_alerts(df, threshold=5)
     daily_actions = []
     if low_stock_alerts.empty:
@@ -564,10 +674,11 @@ elif page == "📦 პროდუქციის სია":
                 selling_price=row.get("Selling_Price", 0),
                 cost_price=row.get("Cost_Price", 0),
             )
-            df.at[index, "Current_Stock"] = max(0, int(row["Current_Stock"]) - sell_qty)
-            df = recalc_metrics(df)
-            save_data(df)
-            st.session_state.df = df
+            full_df = st.session_state.df.copy()
+            full_df.at[index, "Current_Stock"] = max(0, int(row["Current_Stock"]) - sell_qty)
+            full_df = recalc_metrics(full_df)
+            save_data(full_df)
+            st.session_state.df = full_df
             st.rerun()
         if not can_sell:
             c7.caption("ამოიწურა")
@@ -601,7 +712,7 @@ elif page == "📥 საქონლის მიღება":
     selected_store_for_reco = st.session_state.get("add_stock_store", store_options[0])
     selected_product_for_reco = st.session_state.get("add_stock_product", "")
     if selected_product_for_reco:
-        sales_df = load_sales_log()
+        sales_df = sales_df_all.copy()
         store_df = df[
             (df["Store_Name"].astype(str) == str(selected_store_for_reco))
             & (df["Product_Name"].astype(str) == str(selected_product_for_reco))
@@ -645,10 +756,11 @@ elif page == "📥 საქონლის მიღება":
             "Sales_Day7": 0,
             "Expiry_Date": pd.to_datetime(f_expiry)
         }
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        df = recalc_metrics(df)
-        save_data(df)
-        st.session_state.df = df
+        full_df = st.session_state.df.copy()
+        full_df = pd.concat([full_df, pd.DataFrame([new_row])], ignore_index=True)
+        full_df = recalc_metrics(full_df)
+        save_data(full_df)
+        st.session_state.df = full_df
         st.session_state["add_stock_product"] = ""
         st.success("პროდუქტი შენახულია")
         st.experimental_rerun()
@@ -684,10 +796,11 @@ elif page == "🔍 ინვენტარიზაცია":
             if difference == 0:
                 st.warning("ცვლილება არ დაფიქსირდა - ნაშთი უცვლელია.")
             else:
-                df.at[selected_idx, "Current_Stock"] = updated_stock
-                df = recalc_metrics(df)
-                save_data(df)
-                st.session_state.df = df
+                full_df = st.session_state.df.copy()
+                full_df.at[selected_idx, "Current_Stock"] = updated_stock
+                full_df = recalc_metrics(full_df)
+                save_data(full_df)
+                st.session_state.df = full_df
                 append_audit_log(product_name, old_stock, updated_stock, difference, reason, cost_price)
                 st.success("ინვენტარის ცვლილება შენახულია და აუდიტის ჟურნალი განახლდა.")
                 st.rerun()
@@ -696,8 +809,7 @@ elif page == "📈 დეტალური ანალიტიკა":
     st.title("📈 დეტალური ანალიტიკა")
     st.caption("შემოსავლის, მოგებისა და გაყიდვების მოცულობის ანალიზი პერიოდებისა და ფილიალების მიხედვით.")
 
-    df = st.session_state.df
-    sales_df = load_sales_log()
+    sales_df = sales_df_all.copy()
 
     if "analytics_start" not in st.session_state:
         st.session_state.analytics_start = (datetime.now().date() - timedelta(days=6))
