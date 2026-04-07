@@ -218,6 +218,52 @@ def get_weekly_demand_stats(sales_df, product_name, store_name):
     return avg_daily_qty, recommended_qty
 
 
+def get_restock_recommendation_qty(sales_df, product_name, store_name, current_stock):
+    avg_daily_qty, weekly_need = get_weekly_demand_stats(sales_df, product_name, store_name)
+    needed_qty = max(0, int(math.ceil(weekly_need - float(current_stock))))
+    return avg_daily_qty, needed_qty
+
+
+def compute_branch_performance(sales_df):
+    if sales_df.empty:
+        return pd.DataFrame(columns=["Store", "Actual", "Predicted", "PerformancePct", "DownPct"])
+
+    now = datetime.now()
+    last_7_start = now - timedelta(days=7)
+    prev_7_start = now - timedelta(days=14)
+
+    last_7 = sales_df[sales_df["Timestamp"] >= last_7_start]
+    prev_7 = sales_df[(sales_df["Timestamp"] >= prev_7_start) & (sales_df["Timestamp"] < last_7_start)]
+
+    actual = last_7.groupby("Store", as_index=False)["Revenue"].sum().rename(columns={"Revenue": "Actual"})
+    predicted = prev_7.groupby("Store", as_index=False)["Revenue"].sum().rename(columns={"Revenue": "Predicted"})
+    perf = pd.merge(actual, predicted, on="Store", how="outer").fillna(0)
+    perf["Predicted"] = perf["Predicted"].replace(0, 1)
+    perf["PerformancePct"] = (perf["Actual"] / perf["Predicted"] * 100).round(1)
+    perf["DownPct"] = (100 - perf["PerformancePct"]).clip(lower=0).round(1)
+    return perf
+
+
+def get_underperforming_product(sales_df, store_name):
+    if sales_df.empty:
+        return None
+    now = datetime.now()
+    last_7_start = now - timedelta(days=7)
+    prev_7_start = now - timedelta(days=14)
+    last_7 = sales_df[(sales_df["Timestamp"] >= last_7_start) & (sales_df["Store"] == store_name)]
+    prev_7 = sales_df[(sales_df["Timestamp"] >= prev_7_start) & (sales_df["Timestamp"] < last_7_start) & (sales_df["Store"] == store_name)]
+    if last_7.empty or prev_7.empty:
+        return None
+    last_prod = last_7.groupby("Product", as_index=False)["Qty"].sum().rename(columns={"Qty": "LastQty"})
+    prev_prod = prev_7.groupby("Product", as_index=False)["Qty"].sum().rename(columns={"Qty": "PrevQty"})
+    merged = pd.merge(prev_prod, last_prod, on="Product", how="left").fillna(0)
+    merged["Drop"] = merged["PrevQty"] - merged["LastQty"]
+    top = merged.sort_values("Drop", ascending=False).iloc[0]
+    if top["Drop"] > 0:
+        return str(top["Product"])
+    return None
+
+
 def recalc_metrics(df):
     required_base_cols = ["Store_Name", "Product_Name", "Current_Stock", "Cost_Price", "Selling_Price", "Expiry_Date"]
     for col in required_base_cols:
@@ -335,6 +381,7 @@ if page == "🏠 მთავარი პანელი":
     st.subheader("გასათვალისწინებელი შეტყობინებები")
     sales_df = load_sales_log()
     low_stock_alerts = get_low_stock_alerts(df, threshold=5)
+    daily_actions = []
     if low_stock_alerts.empty:
         st.success("კრიტიკული დაბალი ნაშთის პროდუქტები არ არის.")
     else:
@@ -342,9 +389,12 @@ if page == "🏠 მთავარი პანელი":
             store_name = str(row["Store_Name"])
             product_name = str(row["Product_Name"])
             current_stock = int(row["Current_Stock"])
+            daily_actions.append(f"შეამოწმე ნაშთი: {store_name} - {product_name}")
             st.warning(f"{store_name}: {product_name} იწურება! (ნაშთი: {current_stock})")
             with st.expander("რეკომენდაცია"):
-                avg_daily_qty, recommended_qty = get_weekly_demand_stats(sales_df, product_name, store_name)
+                avg_daily_qty, recommended_qty = get_restock_recommendation_qty(
+                    sales_df, product_name, store_name, current_stock
+                )
                 st.info(
                     f"ამ პროდუქტზე კვირაში საშუალოდ {avg_daily_qty:.1f} მოთხოვნაა. "
                     f"გირჩევთ, დაამატოთ მინიმუმ {recommended_qty} ერთეული 1 კვირის მარაგისთვის."
@@ -353,7 +403,29 @@ if page == "🏠 მთავარი პანელი":
                     st.session_state.page_nav = "📥 საქონლის მიღება"
                     st.session_state.prefill_product = product_name
                     st.session_state.prefill_store = store_name
+                    st.session_state.prefill_qty = max(1, recommended_qty)
                     st.rerun()
+
+    perf_df = compute_branch_performance(sales_df)
+    if not perf_df.empty:
+        for _, p_row in perf_df.iterrows():
+            if float(p_row["PerformancePct"]) < 85:
+                branch = str(p_row["Store"])
+                down_pct = float(p_row["DownPct"])
+                weak_product = get_underperforming_product(sales_df, branch) or "პროდუქტი"
+                daily_actions.append(f"დაადასტურე შეკვეთა: {branch}")
+                st.error(
+                    f"{branch}: ეფექტურობა შემცირებულია {down_pct:.0f}% -ით. "
+                    f"რეკომენდაცია: ფასდაკლება პროდუქტზე {weak_product} გაყიდვების გასაზრდელად."
+                )
+
+    st.divider()
+    st.subheader("დღიური დავალებები")
+    if not daily_actions:
+        st.info("დღეს კრიტიკული დავალებები არ არის.")
+    else:
+        for i, action in enumerate(daily_actions[:8], start=1):
+            st.write(f"{i}. {action}")
 
 elif page == "📦 პროდუქციის სია":
     st.title("📦 პროდუქციის სია")
@@ -384,19 +456,28 @@ elif page == "📦 პროდუქციის სია":
         c5.write(row["დარჩენილი დღე"])
         c6.write(row["დღე ვადის გასვლამდე"])
         can_sell = row["Current_Stock"] > 0
+        qty_key = f"sell_qty_{int(index)}"
+        c7.number_input("რაოდ.", min_value=1, value=1, step=1, key=qty_key, label_visibility="collapsed")
         sell_key = f"sell_btn_{int(index)}_{str(row.get('Product_Name', ''))}_{str(row.get('Store_Name', ''))}"
         if c7.button("გაყიდვა", key=sell_key, disabled=not can_sell):
+            sell_qty = int(st.session_state.get(qty_key, 1))
+            if sell_qty > int(row["Current_Stock"]):
+                st.warning("ნაშთზე მეტი გაყიდვა ვერ შესრულდება. არის თუ არა დათვლის შეცდომა? პირველ რიგში გაასწორე ინვენტარი.")
+                if st.button("ინვენტარის გასწორებაზე გადასვლა", key=f"fix_inventory_{index}"):
+                    st.session_state.page_nav = "🔍 ინვენტარიზაცია"
+                    st.rerun()
+                continue
             unit_profit = float(row.get("Selling_Price", 0)) - float(row.get("Cost_Price", 0))
-            st.session_state.daily_profit += unit_profit
+            st.session_state.daily_profit += unit_profit * sell_qty
             append_sales_log(
                 sale_date=datetime.now(),
                 store=row.get("Store_Name", ""),
                 product=row.get("Product_Name", ""),
-                qty=1,
+                qty=sell_qty,
                 selling_price=row.get("Selling_Price", 0),
                 cost_price=row.get("Cost_Price", 0),
             )
-            df.at[index, "Current_Stock"] = max(0, int(row["Current_Stock"]) - 1)
+            df.at[index, "Current_Stock"] = max(0, int(row["Current_Stock"]) - sell_qty)
             df = recalc_metrics(df)
             save_data(df)
             st.session_state.df = df
@@ -418,18 +499,43 @@ elif page == "📥 საქონლის მიღება":
     store_options = df["Store_Name"].unique() if not df.empty else ["Gldani_Branch"]
     prefill_product = st.session_state.pop("prefill_product", "")
     prefill_store = st.session_state.pop("prefill_store", "")
+    prefill_qty = st.session_state.pop("prefill_qty", None)
     if prefill_product:
         st.session_state["add_stock_product"] = prefill_product
     if prefill_store and prefill_store in store_options:
         st.session_state["add_stock_store"] = prefill_store
     elif "add_stock_store" not in st.session_state:
         st.session_state["add_stock_store"] = store_options[0]
+    if prefill_qty is not None:
+        st.session_state["add_stock_qty"] = int(prefill_qty)
+    elif "add_stock_qty" not in st.session_state:
+        st.session_state["add_stock_qty"] = 1
+
+    selected_store_for_reco = st.session_state.get("add_stock_store", store_options[0])
+    selected_product_for_reco = st.session_state.get("add_stock_product", "")
+    if selected_product_for_reco:
+        sales_df = load_sales_log()
+        store_df = df[
+            (df["Store_Name"].astype(str) == str(selected_store_for_reco))
+            & (df["Product_Name"].astype(str) == str(selected_product_for_reco))
+        ]
+        current_stock = int(store_df["Current_Stock"].iloc[0]) if not store_df.empty else 0
+        avg_daily_qty, needed_qty = get_restock_recommendation_qty(
+            sales_df, selected_product_for_reco, selected_store_for_reco, current_stock
+        )
+        st.info(
+            f"რეკომენდაცია: {selected_product_for_reco} ({selected_store_for_reco}) - "
+            f"კვირაში საშუალოდ {avg_daily_qty:.1f} მოთხოვნაა; დაამატე {needed_qty} ერთეული."
+        )
+        if st.button("რეკომენდაციის მიღება"):
+            st.session_state["add_stock_qty"] = max(1, needed_qty)
+            st.rerun()
 
     with st.form("manual_add"):
         col1, col2 = st.columns(2, gap="large")
         f_store = col1.selectbox("მაღაზია", store_options, key="add_stock_store")
         f_name = col2.text_input("პროდუქტი", key="add_stock_product")
-        f_qty = col1.number_input("რაოდენობა", min_value=1)
+        f_qty = col1.number_input("რაოდენობა", min_value=1, key="add_stock_qty")
         f_cost_price = col1.number_input("თვითღირებულება", min_value=0.0, format="%.2f")
         f_selling_price = col2.number_input("გასაყიდი ფასი", min_value=0.0, format="%.2f")
         f_expiry = col2.date_input("ვადა")
