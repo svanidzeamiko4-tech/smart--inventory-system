@@ -72,6 +72,7 @@ def ensure_auth_files():
                     "role": "Store_Manager",
                     "company": "Ifkli",
                     "store": "გლდანის ფილიალი",
+                    "assigned_branch": "გლდანის ფილიალი",
                     "allowed_stores": "გლდანის ფილიალი",
                     "allowed_products": "",
                 },
@@ -81,6 +82,7 @@ def ensure_auth_files():
                     "role": "Company_Admin",
                     "company": "Ifkli",
                     "store": "",
+                    "assigned_branch": "",
                     "allowed_stores": "გლდანის ფილიალი|ვაკის ფილიალი",
                     "allowed_products": "Apple|Banana|Milk|Bread|Rice",
                 },
@@ -90,6 +92,7 @@ def ensure_auth_files():
                     "role": "Distributor",
                     "company": "Ifkli",
                     "store": "",
+                    "assigned_branch": "",
                     "allowed_stores": "გლდანის ფილიალი|ვაკის ფილიალი",
                     "allowed_products": "Apple|Banana|Milk|Bread|Rice",
                 },
@@ -170,6 +173,8 @@ def load_users():
         users_df["company"] = ""
     if "store" not in users_df.columns:
         users_df["store"] = ""
+    if "assigned_branch" not in users_df.columns:
+        users_df["assigned_branch"] = users_df["store"] if "store" in users_df.columns else ""
     if "allowed_stores" not in users_df.columns:
         users_df["allowed_stores"] = ""
     if "allowed_products" not in users_df.columns:
@@ -185,6 +190,7 @@ def load_users():
                     "role": "Admin",
                     "company": "Global",
                     "store": "",
+                    "assigned_branch": "",
                     "allowed_stores": "",
                     "allowed_products": "",
                 }
@@ -229,7 +235,7 @@ def apply_role_filters(df, sales_df, auth_user, mapping_data):
         return filtered_df, filtered_sales
 
     if role == "Store_Manager":
-        store_name = auth_user.get("store", "")
+        store_name = auth_user.get("assigned_branch", "") or auth_user.get("store", "")
         filtered_df = filtered_df[filtered_df["Store_Name"].astype(str) == str(store_name)]
         if not filtered_sales.empty:
             filtered_sales = filtered_sales[filtered_sales["Store"].astype(str) == str(store_name)]
@@ -271,6 +277,8 @@ def get_default_page_for_role(role):
         return "🤝 დისტრიბუტორების მართვა"
     if role == "Distributor":
         return "🚚 აუცილებელი მიწოდებები"
+    if role == "Store_Manager":
+        return "🏠 მაღაზიის პანელი"
     return "🏢 კომპანიის მართვა"
 
 
@@ -649,6 +657,8 @@ if role == "Super_Admin":
     pages = ["🏢 კომპანიის მართვა", "🌍 გლობალური ანალიტიკა"]
 elif role == "Company_Admin":
     pages = ["🤝 დისტრიბუტორების მართვა", "📈 პროდუქტის ეფექტიანობა"]
+elif role == "Store_Manager":
+    pages = ["🏠 მაღაზიის პანელი", "🛒 გაყიდვები", "📥 მარაგების მიღება"]
 elif role == "Distributor":
     pages = ["🚚 აუცილებელი მიწოდებები"]
 else:
@@ -689,6 +699,39 @@ if role == "Super_Admin":
 if page == "🏢 კომპანიის მართვა":
     st.title("🏢 კომპანიის მართვა")
     st.caption("სუპერ-ადმინისტრატორის სამუშაო სივრცე: კომპანიები, მარაგები და ოპერაციული სიგნალები.")
+
+    st.subheader("მომხმარებლის ფილიალზე მიბმა")
+    users_for_branch = load_users()
+    branch_users = [u for u in users_for_branch if u.get("role") in ["Store_Manager", "Distributor"]]
+    all_branches = sorted(master_df["Store_Name"].astype(str).unique().tolist()) if not master_df.empty else []
+    with st.form("assign_branch_form"):
+        selected_user = st.selectbox("მომხმარებელი", [u.get("username", "") for u in branch_users] if branch_users else [])
+        selected_branch = st.selectbox("ფილიალი", all_branches if all_branches else [""])
+        assign_submitted = st.form_submit_button("მიბმა")
+    if assign_submitted and selected_user and selected_branch:
+        updated_users = []
+        selected_role = ""
+        for user in users_for_branch:
+            if user.get("username") == selected_user:
+                selected_role = user.get("role", "")
+                user["assigned_branch"] = selected_branch
+                user["store"] = selected_branch
+                if user.get("role") == "Distributor":
+                    user["allowed_stores"] = selected_branch
+            updated_users.append(user)
+        save_users(updated_users)
+        if selected_role == "Distributor":
+            map_df = mapping_data.get("df", pd.DataFrame(columns=["mapping_type", "key", "value"]))
+            map_df = map_df[
+                ~((map_df["mapping_type"] == "distributor_store") & (map_df["key"] == selected_user))
+            ]
+            map_df = pd.concat(
+                [map_df, pd.DataFrame([{"mapping_type": "distributor_store", "key": selected_user, "value": selected_branch}])],
+                ignore_index=True,
+            )
+            map_df.to_csv(MAPPING_FILE, index=False)
+        st.success(f"{selected_user} მიბმულია ფილიალზე: {selected_branch}")
+        st.rerun()
 
     zero_stock = df[df["Current_Stock"] <= 0]
     expiring_soon = df[df["დღე ვადის გასვლამდე"] <= 3]
@@ -793,6 +836,95 @@ elif page == "🚚 აუცილებელი მიწოდებები
                 st.error(f"{store_name} - {product_name}: ნაშთი 0. მიაწოდეთ მინიმუმ {recommended_qty} ერთეული.")
             else:
                 st.warning(f"{store_name} - {product_name}: ნაშთი {current_stock}. რეკომენდაცია: +{recommended_qty} ერთეული.")
+
+elif page == "🏠 მაღაზიის პანელი":
+    st.title("🏠 მაღაზიის პანელი")
+    assigned_branch = auth_user.get("assigned_branch", "") or auth_user.get("store", "")
+    st.caption(f"ფილიალი: {assigned_branch}")
+    sales_df = sales_df_all.copy()
+    low_stock_alerts = get_low_stock_alerts(df, threshold=5)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("პროდუქტი", len(df))
+    c2.metric("დაბალი ნაშთი", len(low_stock_alerts))
+    c3.metric("დღიური მოგება", f"{st.session_state.daily_profit:.2f}")
+    if low_stock_alerts.empty:
+        st.info("დაბალი ნაშთის გაფრთხილება არ არის.")
+    else:
+        for _, row in low_stock_alerts.iterrows():
+            product_name = str(row["Product_Name"])
+            current_stock = int(row["Current_Stock"])
+            _, recommended_qty = get_restock_recommendation_qty(sales_df, product_name, assigned_branch, current_stock)
+            st.warning(f"რეკომენდაცია: მოითხოვეთ {product_name} დისტრიბუტორისგან (+{recommended_qty}).")
+
+elif page == "🛒 გაყიდვები":
+    st.title("🛒 გაყიდვები")
+    if df.empty:
+        st.info("ფილიალისთვის პროდუქცია არ არის ხელმისაწვდომი.")
+    else:
+        options = [f"{row['Product_Name']} (ნაშთი: {int(row['Current_Stock'])})" for _, row in df.iterrows()]
+        with st.form("pos_form"):
+            selected_label = st.selectbox("პროდუქტი", options)
+            sell_qty = st.number_input("რაოდენობა", min_value=1, value=1, step=1)
+            submitted_pos = st.form_submit_button("გაყიდვა")
+        if submitted_pos:
+            selected_idx = options.index(selected_label)
+            index = df.index[selected_idx]
+            row = df.loc[index]
+            current_stock = int(row["Current_Stock"])
+            if int(sell_qty) > current_stock:
+                st.warning("ნაშთზე მეტი გაყიდვა შეუძლებელია. გამოიყენეთ ინვენტარიზაცია.")
+            else:
+                full_df = st.session_state.df.copy()
+                full_df.at[index, "Current_Stock"] = max(0, current_stock - int(sell_qty))
+                full_df = recalc_metrics(full_df)
+                save_data(full_df)
+                st.session_state.df = full_df
+                append_sales_log(
+                    sale_date=datetime.now(),
+                    store=row.get("Store_Name", ""),
+                    product=row.get("Product_Name", ""),
+                    qty=int(sell_qty),
+                    selling_price=row.get("Selling_Price", 0),
+                    cost_price=row.get("Cost_Price", 0),
+                )
+                st.success("გაყიდვა შენახულია.")
+                st.rerun()
+
+elif page == "📥 მარაგების მიღება":
+    st.title("📥 მარაგების მიღება")
+    assigned_branch = auth_user.get("assigned_branch", "") or auth_user.get("store", "")
+    st.caption(f"ფილიალი: {assigned_branch}")
+    with st.form("store_receive_stock_form"):
+        f_name = st.text_input("პროდუქტი")
+        f_qty = st.number_input("რაოდენობა", min_value=1, value=1, step=1)
+        f_cost_price = st.number_input("თვითღირებულება", min_value=0.0, format="%.2f")
+        f_selling_price = st.number_input("გასაყიდი ფასი", min_value=0.0, format="%.2f")
+        f_expiry = st.date_input("ვადა")
+        receive_submitted = st.form_submit_button("შენახვა")
+    if receive_submitted:
+        full_df = st.session_state.df.copy()
+        new_row = {
+            "Store_Name": assigned_branch,
+            "Product_Name": f_name,
+            "Current_Stock": int(f_qty),
+            "Cost_Price": float(f_cost_price),
+            "Selling_Price": float(f_selling_price),
+            "Price": float(f_selling_price),
+            "Sales_Day1": 0,
+            "Sales_Day2": 0,
+            "Sales_Day3": 0,
+            "Sales_Day4": 0,
+            "Sales_Day5": 0,
+            "Sales_Day6": 0,
+            "Sales_Day7": 0,
+            "Expiry_Date": pd.to_datetime(f_expiry),
+        }
+        full_df = pd.concat([full_df, pd.DataFrame([new_row])], ignore_index=True)
+        full_df = recalc_metrics(full_df)
+        save_data(full_df)
+        st.session_state.df = full_df
+        st.success("მარაგი მიღებულია.")
+        st.rerun()
 
 elif page == "📦 პროდუქციის სია":
     st.title("📦 პროდუქციის სია")
