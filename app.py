@@ -264,6 +264,17 @@ def get_underperforming_product(sales_df, store_name):
     return None
 
 
+def get_branches_with_no_sales_last_3h(sales_df, df):
+    if df.empty:
+        return []
+    all_stores = sorted(df["Store_Name"].astype(str).unique().tolist())
+    if sales_df.empty:
+        return all_stores
+    cutoff = datetime.now() - timedelta(hours=3)
+    recent_stores = sales_df[sales_df["Timestamp"] >= cutoff]["Store"].astype(str).unique().tolist()
+    return [store for store in all_stores if store not in recent_stores]
+
+
 def recalc_metrics(df):
     required_base_cols = ["Store_Name", "Product_Name", "Current_Stock", "Cost_Price", "Selling_Price", "Expiry_Date"]
     for col in required_base_cols:
@@ -389,22 +400,24 @@ if page == "🏠 მთავარი პანელი":
             store_name = str(row["Store_Name"])
             product_name = str(row["Product_Name"])
             current_stock = int(row["Current_Stock"])
-            daily_actions.append(f"შეამოწმე ნაშთი: {store_name} - {product_name}")
+            daily_actions.append(f"[მაღალი] შეამოწმე ნაშთი: {store_name} - {product_name}")
             st.warning(f"{store_name}: {product_name} იწურება! (ნაშთი: {current_stock})")
             with st.expander("რეკომენდაცია"):
                 avg_daily_qty, recommended_qty = get_restock_recommendation_qty(
                     sales_df, product_name, store_name, current_stock
                 )
-                st.info(
-                    f"ამ პროდუქტზე კვირაში საშუალოდ {avg_daily_qty:.1f} მოთხოვნაა. "
-                    f"გირჩევთ, დაამატოთ მინიმუმ {recommended_qty} ერთეული 1 კვირის მარაგისთვის."
-                )
-                if st.button("გადასვლა", key=f"goto_add_stock_{idx}"):
+                st.info(f"{product_name} იწურება. ბოლო კვირის გაყიდვებით გირჩევთ დაამატოთ {recommended_qty} რაოდენობა")
+                if st.button("მიღება", key=f"goto_add_stock_{idx}"):
                     st.session_state.page_nav = "📥 საქონლის მიღება"
                     st.session_state.prefill_product = product_name
                     st.session_state.prefill_store = store_name
                     st.session_state.prefill_qty = max(1, recommended_qty)
                     st.rerun()
+
+    inactive_branches = get_branches_with_no_sales_last_3h(sales_df, df)
+    for branch in inactive_branches:
+        st.warning(f"{branch}: ყურადღება, გაყიდვები შეჩერებულია! შეამოწმეთ სტატუსი")
+        daily_actions.append(f"[მაღალი] შეამოწმე გაყიდვების სტატუსი: {branch}")
 
     perf_df = compute_branch_performance(sales_df)
     if not perf_df.empty:
@@ -413,14 +426,14 @@ if page == "🏠 მთავარი პანელი":
                 branch = str(p_row["Store"])
                 down_pct = float(p_row["DownPct"])
                 weak_product = get_underperforming_product(sales_df, branch) or "პროდუქტი"
-                daily_actions.append(f"დაადასტურე შეკვეთა: {branch}")
+                daily_actions.append(f"[საშუალო] დაადასტურე შეკვეთა: {branch}")
                 st.error(
                     f"{branch}: ეფექტურობა შემცირებულია {down_pct:.0f}% -ით. "
                     f"რეკომენდაცია: ფასდაკლება პროდუქტზე {weak_product} გაყიდვების გასაზრდელად."
                 )
 
     st.divider()
-    st.subheader("დღიური დავალებები")
+    st.subheader("დღიური სამოქმედო გეგმა")
     if not daily_actions:
         st.info("დღეს კრიტიკული დავალებები არ არის.")
     else:
@@ -455,15 +468,16 @@ elif page == "📦 პროდუქციის სია":
         c4.write(f"{float(row.get('Selling_Price', 0)):.2f}")
         c5.write(row["დარჩენილი დღე"])
         c6.write(row["დღე ვადის გასვლამდე"])
-        can_sell = row["Current_Stock"] > 0
+        current_stock = int(row["Current_Stock"])
+        can_sell = current_stock > 0
         qty_key = f"sell_qty_{int(index)}"
         c7.number_input("რაოდ.", min_value=1, value=1, step=1, key=qty_key, label_visibility="collapsed")
         sell_key = f"sell_btn_{int(index)}_{str(row.get('Product_Name', ''))}_{str(row.get('Store_Name', ''))}"
-        if c7.button("გაყიდვა", key=sell_key, disabled=not can_sell):
+        if c7.button("გაყიდვა", key=sell_key):
             sell_qty = int(st.session_state.get(qty_key, 1))
-            if sell_qty > int(row["Current_Stock"]):
+            if not can_sell or sell_qty > current_stock:
                 st.warning("ნაშთზე მეტი გაყიდვა ვერ შესრულდება. არის თუ არა დათვლის შეცდომა? პირველ რიგში გაასწორე ინვენტარი.")
-                if st.button("ინვენტარის გასწორებაზე გადასვლა", key=f"fix_inventory_{index}"):
+                if st.button("ნაშთის გასწორება", key=f"fix_inventory_{index}"):
                     st.session_state.page_nav = "🔍 ინვენტარიზაცია"
                     st.rerun()
                 continue
