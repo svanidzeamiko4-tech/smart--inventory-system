@@ -556,6 +556,8 @@ def ensure_auth_files():
                 "ordered_qty",
                 "unit_price",
                 "status",
+                "notes",
+                "issue",
             ]
         ).to_csv(PENDING_DELIVERY_FILE, index=False)
 
@@ -571,6 +573,7 @@ def ensure_auth_files():
                 "confirmed_qty",
                 "difference",
                 "reason",
+                "corrected_by",
             ]
         ).to_csv(DISCREPANCY_LOG_FILE, index=False)
 
@@ -2088,11 +2091,20 @@ def get_live_store_stock(store_name, product_name):
     return int(pd.to_numeric(live_df.loc[mask, "Current_Stock"], errors="coerce").fillna(0).iloc[0])
 
 
-def get_distributor_recommended_order(sales_df, store_name, product_name, live_stock):
-    avg_daily, needed = get_restock_recommendation_qty(sales_df, product_name, store_name, live_stock)
-    if live_stock < 10:
-        return max(40, needed), avg_daily
-    return max(needed, 0), avg_daily
+def get_distributor_recommended_order(sales_df, store_name, product_name, live_stock, safe_target_stock: int = 50):
+    """რეკომენდაცია: მიზნობრივი ნაშთი − მიმდინარე (მაგ. 50−5=45) + გაყიდვებზე დაფუძნებული მოთხოვნა."""
+    ls = int(pd.to_numeric(live_stock, errors="coerce") or 0)
+    safe_fill = max(0, int(safe_target_stock) - ls)
+    avg_daily, needed = get_restock_recommendation_qty(sales_df, product_name, store_name, ls)
+    need_i = max(0, int(math.ceil(float(needed))))
+    if ls < 10:
+        return max(40, need_i, safe_fill), avg_daily
+    return max(need_i, safe_fill), avg_daily
+
+
+def get_distributor_safe_fill_qty(live_stock, safe_target_stock: int = 50):
+    ls = int(pd.to_numeric(live_stock, errors="coerce") or 0)
+    return max(0, int(safe_target_stock) - ls)
 
 
 def get_yesterday_sales_qty(sales_df, store_name, product_name):
@@ -2208,6 +2220,15 @@ def recalc_metrics(df):
 def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
     """დისტრიბუტორის დაფა (ლოკალური კომპონენტი): გეგმა, სახელფასო, მაღაზიები, ძიება, მარშრუტი, ჟურნალები."""
     st.title("🚚 დისტრიბუტორის სუპერ დაფა")
+    st.markdown(
+        """
+        <style>
+        @keyframes distributor-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+        .distributor-sos-blink { display: inline-block; animation: distributor-blink 1.1s ease-in-out infinite; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.caption(
         "ერთიანი სისტემა: მარაგი — "
         f"`{FILE_NAME}` · მიწოდებები — `deliveries_log.csv` · დაბრუნებები — `returns_log.csv`. "
@@ -2215,13 +2236,19 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
     )
 
     ensure_demo_sales_log_entries_today()
-    sales_df_all = load_sales_log()
-
-    fresh_df = load_data()
-    if not fresh_df.empty:
-        st.session_state.df = recalc_metrics(ensure_data_structure(fresh_df.copy()))
-    distributor_live_df = fresh_df.copy() if not fresh_df.empty else fresh_df
-    mapping_data = load_mapping()
+    mdata = mapping_data if mapping_data is not None else load_mapping()
+    _sales_full = load_sales_log()
+    _full_from_disk = load_data()
+    if not _full_from_disk.empty:
+        _full_from_disk = ensure_data_structure(_full_from_disk.copy())
+        st.session_state.df = recalc_metrics(_full_from_disk.copy())
+    distributor_live_df, sales_df_all = apply_role_filters(
+        _full_from_disk.copy() if not _full_from_disk.empty else _full_from_disk,
+        _sales_full,
+        auth_user,
+        mdata,
+    )
+    mapping_data = mdata
     if not distributor_live_df.empty:
         distributor_live_df["Current_Stock"] = pd.to_numeric(distributor_live_df["Current_Stock"], errors="coerce").fillna(0)
     user_company = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
@@ -2414,6 +2441,27 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
             )
 
     st.divider()
+
+    st.subheader("🔔 ყურადღება მისაქცევია!")
+    _crit_df = (
+        distributor_live_df.assign(
+            _cs=pd.to_numeric(distributor_live_df["Current_Stock"], errors="coerce").fillna(0)
+        )
+        if not distributor_live_df.empty and "Current_Stock" in distributor_live_df.columns
+        else pd.DataFrame()
+    )
+    if not _crit_df.empty:
+        _crit_df = _crit_df[_crit_df["_cs"] < 5]
+    if _crit_df.empty:
+        st.info("კრიტიკული ნაშთი (ნაშთი < 5) თქვენი მარშრუტისთვის ამ ეტაპზე არ ფიქსირდება.")
+    else:
+        for _, _cr in _crit_df.iterrows():
+            _sname = str(_cr.get("Store_Name", "")).strip()
+            _pname = str(_cr.get("Product_Name", "")).strip()
+            _n = int(_cr["_cs"])
+            st.warning(
+                f"🟥 კრიტიკული ნაშთი: {_sname}-ში {_pname} იწურება (ნაშთი: {_n})!"
+            )
 
     # --- შუა: ფილტრები (ძიება — მარშრუტის ჩანართში, ფილიალების სიის ზემოთ) ---
     st.markdown("### 🔎 ფილტრები")
@@ -2624,16 +2672,26 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
                             rec_qty, avg_daily = get_distributor_recommended_order(
                                 sales_df_all, active_store, product_name, live_stock
                             )
+                            safe_fill_amt = get_distributor_safe_fill_qty(live_stock, safe_target_stock=50)
                             yesterday_sales = get_yesterday_sales_qty(sales_df_all, active_store, product_name)
                             truck_qty = get_truck_qty(auth_user.get("username", ""), product_name)
                             c1, c2 = st.columns([2, 1])
+                            if live_stock < 5:
+                                c1.markdown(
+                                    '<span class="distributor-sos-blink" title="კრიტიკული ნაშთი">🚨</span>',
+                                    unsafe_allow_html=True,
+                                )
                             if live_stock < 10:
                                 c1.error(f"🔴 {product_name} — კრიტიკული ნაშთი")
                             else:
                                 c1.markdown(f"**{product_name}**")
                             c1.caption(f"🛒 მაღაზიის ნაშთი: {live_stock}")
                             c1.caption(f"📈 გუშინდელი გაყიდვა: {yesterday_sales}")
-                            c1.caption(f"📦 შემოთავაზებული რაოდენობა: {rec_qty} | საშუალო დღიური გაყიდვა: {avg_daily:.1f}")
+                            c1.caption(
+                                f"შემოთავაზებული რაოდენობა: {rec_qty} | "
+                                f"რეკომენდირებული შევსება (მიზანი 50): {safe_fill_amt} | "
+                                f"საშუალო დღიური გაყიდვა: {avg_daily:.1f}"
+                            )
                             c1.caption(f"🚚 ბორტზე ხელმისაწვდომი: {truck_qty}")
                             delivered_qty = c1.number_input(
                                 f"{product_name} — მიწოდებული რაოდენობა (ხელით შესაცვლელი)",
@@ -2704,7 +2762,7 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
                                         reason="დაბრუნება",
                                         note=notes_clean,
                                     )
-                                if issue_val and issue_val != "არ არის" or notes_clean:
+                                if (issue_val and issue_val != "არ არის") or notes_clean:
                                     append_discrepancy_log(
                                         distributor=str(auth_user.get("username", "")),
                                         company=user_company,
