@@ -4,6 +4,7 @@ user_company,admin,Global
 user_company,ifkli_admin,Ifkli
 user_company,ifkli_operator,Ifkli
 user_company,distributor_a,Ifkli
+user_company,market_mgr,Ifkli
 company_product,Ifkli,Apple
 company_product,Ifkli,Banana
 company_product,Ifkli,Milk

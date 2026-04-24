@@ -24,7 +24,10 @@ def parse_rs_payload(payload_text):
             )
         return {"waybill_no": waybill_no, "store": store, "items": items}
 
-    parsed = json.loads(payload_text)
+    try:
+        parsed = json.loads(payload_text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {"waybill_no": "", "store": "", "items": []}
     items = []
     for item in parsed.get("items", []):
         items.append(
