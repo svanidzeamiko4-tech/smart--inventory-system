@@ -1,6 +1,6 @@
 import pandas as pd
 import streamlit as st
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import os
 import random
 import math
@@ -24,6 +24,8 @@ ADJUSTMENT_REQUEST_FILE = "adjustment_requests.csv"
 TRUCK_STOCK_FILE = "truck_stock.csv"
 RETURNS_LOG_FILE = "returns_log.csv"
 STORES_DIRECTORY_FILE = "stores_directory.csv"
+# ერთიანი მარაგის ფაილი (UI/დოკ.: inventory.csv → იგივე Product.csv.txt)
+SHARED_INVENTORY_FILE = FILE_NAME
 STORE_NAME_MAP = {
     "Gldani_Branch": "გლდანის ფილიალი",
     "Vake_Branch": "ვაკის ფილიალი",
@@ -251,6 +253,16 @@ def load_stores_directory_df():
     return sdf
 
 
+@st.cache_data(ttl=120)
+def get_cached_store_directory_names():
+    """stores_directory.csv-ის უნიკალური სახელები (სწრადი სია). CSV-ის შეცვლის შემდეგ — .clear() ან TTL."""
+    sdf = load_stores_directory_df()
+    if sdf.empty or "Store_Name" not in sdf.columns:
+        return tuple()
+    names = sorted({str(x).strip() for x in sdf["Store_Name"].tolist() if str(x).strip()})
+    return tuple(names)
+
+
 def get_store_contact_info(store_name):
     """დაბრუნებს (მისამართი, ტელეფონი) ფილიალისთვის — CSV დირექტორია ან ლეგაცია."""
     sn = str(store_name).strip()
@@ -405,6 +417,18 @@ def ensure_auth_files():
                     "allowed_stores": "გლდანის ფილიალი|ვაკის ფილიალი|ნიკორა - ვაკე|ორი ნაბიჯი - საბურთალო|სპარი - გლდანი|მაგნიტი - ისანი|აგრო ჰაბი - დიდუბე|ფუდმარტი - ვარკეთილი|სუპერფუდი - ნაძალადევი|გურმე სახლი - მარჯანიშვილი|ევრო პროდუქტი - ჩუღურეთი|მარკეტი 24 - დიღომი",
                     "allowed_products": "Apple|Banana|Milk|Bread|Rice|Cheese|Yogurt|Water|Juice|Pasta|Honey|Chocolate",
                 },
+                {
+                    "username": "market_mgr",
+                    "password_hash": hash_password("market123"),
+                    "role": "Market",
+                    "company": "Ifkli",
+                    "retail_chain": "Ifkli_Retail",
+                    "store": "",
+                    "assigned_branch": "",
+                    "commission_rate": 0.0,
+                    "allowed_stores": "",
+                    "allowed_products": "",
+                },
             ]
         )
         default_users_df.to_csv(USERS_FILE, index=False)
@@ -449,6 +473,7 @@ def ensure_auth_files():
                 {"mapping_type": "user_company", "key": "ifkli_admin", "value": "Ifkli"},
                 {"mapping_type": "user_company", "key": "ifkli_operator", "value": "Ifkli"},
                 {"mapping_type": "user_company", "key": "distributor_a", "value": "Ifkli"},
+                {"mapping_type": "user_company", "key": "market_mgr", "value": "Ifkli"},
                 {"mapping_type": "company_product", "key": "Ifkli", "value": "Apple"},
                 {"mapping_type": "company_product", "key": "Ifkli", "value": "Banana"},
                 {"mapping_type": "company_product", "key": "Ifkli", "value": "Milk"},
@@ -649,8 +674,15 @@ def append_delivery_log(
     delivery_id=None,
     waybill_no="",
     rs_status="Pending on RS.GE",
+    at_time=None,
 ):
-    ts = datetime.now()
+    ts = datetime.now() if at_time is None else at_time
+    if not isinstance(ts, datetime):
+        ts = pd.to_datetime(ts, errors="coerce")
+        if pd.isna(ts):
+            ts = datetime.now()
+        else:
+            ts = ts.to_pydatetime()
     row = {
         "id": delivery_id if delivery_id else f"del_{int(ts.timestamp() * 1000)}_{random.randint(1000, 9999)}",
         "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1301,6 +1333,39 @@ def load_users():
         users_df = pd.concat([users_df, admin_row], ignore_index=True)
         safe_write_csv(users_df, USERS_FILE)
 
+    market_exists = (users_df["username"].astype(str) == "market_mgr").any()
+    if not market_exists:
+        market_row = pd.DataFrame(
+            [
+                {
+                    "username": "market_mgr",
+                    "password_hash": hash_password("market123"),
+                    "password": "",
+                    "role": "Market",
+                    "company": "Ifkli",
+                    "retail_chain": "Ifkli_Retail",
+                    "store": "",
+                    "branch": "",
+                    "assigned_branch": "",
+                    "commission_rate": "0.0",
+                    "allowed_stores": "",
+                    "allowed_products": "",
+                    "monthly_sales_target": "0",
+                }
+            ]
+        )
+        users_df = pd.concat([users_df, market_row], ignore_index=True)
+        safe_write_csv(users_df, USERS_FILE)
+        if os.path.exists(MAPPING_FILE):
+            mdf = pd.read_csv(MAPPING_FILE, dtype=str).fillna("")
+            m = (mdf["mapping_type"].astype(str) == "user_company") & (mdf["key"].astype(str) == "market_mgr")
+            if not m.any():
+                mdf = pd.concat(
+                    [mdf, pd.DataFrame([{"mapping_type": "user_company", "key": "market_mgr", "value": "Ifkli"}])],
+                    ignore_index=True,
+                )
+                safe_write_csv(mdf, MAPPING_FILE)
+
     users = users_df.to_dict("records")
     for user in users:
         # Backward compatibility if old Admin role exists
@@ -1346,6 +1411,15 @@ def apply_role_filters(df, sales_df, auth_user, mapping_data):
         filtered_df = filtered_df[filtered_df["Store_Name"].astype(str) == str(store_name)]
         if not filtered_sales.empty:
             filtered_sales = filtered_sales[filtered_sales["Store"].astype(str) == str(store_name)]
+        return filtered_df, filtered_sales
+
+    if role == "Market":
+        store_name = str(st.session_state.get("market_store_pick_main", "")).strip()
+        if not store_name:
+            return filtered_df.iloc[0:0], filtered_sales.iloc[0:0]
+        filtered_df = filtered_df[filtered_df["Store_Name"].astype(str) == store_name]
+        if not filtered_sales.empty:
+            filtered_sales = filtered_sales[filtered_sales["Store"].astype(str) == store_name]
         return filtered_df, filtered_sales
 
     if role == "Distributor":
@@ -1415,6 +1489,9 @@ def get_role_scope(auth_user, mapping_data):
     if role == "Store_Manager":
         branch = auth_user.get("assigned_branch", "") or auth_user.get("store", "")
         return {"role": role, "stores": set([branch]) if branch else set(), "products": None}
+    if role == "Market":
+        ms = str(st.session_state.get("market_store_pick_main", "")).strip()
+        return {"role": role, "stores": set([ms]) if ms else set(), "products": None}
     if role == "Company_Admin":
         return {"role": role, "stores": None, "products": set(company_products.get(company, set()))}
     if role == "Company_Operator":
@@ -1472,6 +1549,8 @@ def get_default_page_for_role(role):
         return "🚚 აუცილებელი მიწოდებები"
     if role == "Store_Manager":
         return "🏠 მაღაზიის პანელი"
+    if role == "Market":
+        return "🏪 ბაზრის პანელი"
     return "🏢 კომპანიის მართვა"
 
 
@@ -1642,6 +1721,21 @@ def load_sales_log():
     return pd.DataFrame(columns=["Timestamp", "Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"])
 
 
+@st.cache_data(ttl=120)
+def _cached_monthly_analytics_sales(sales_mtime: float):
+    return load_sales_log()
+
+
+def distributor_plan_bonus_estimate(plan_target: float, net_deliveries: float) -> float:
+    """გეგმის შესრულების პრემია: თუ ნეტო მიწოდება ≥ თვიური გეგმა — ფიქსირებული + ზედმეტი ნაწილი."""
+    pt = float(plan_target or 0)
+    nd = float(net_deliveries or 0)
+    if pt <= 0 or nd < pt:
+        return 0.0
+    excess = nd - pt
+    return round(0.02 * pt + 0.008 * excess, 2)
+
+
 def reset_system_data():
     for file_path in [FILE_NAME, SALES_LOG_FILE]:
         if os.path.exists(file_path):
@@ -1750,6 +1844,189 @@ def generate_month_sales_simulation(current_df, transactions=10000):
     inventory_df = recalc_metrics(inventory_df)
     save_data(inventory_df)
     return inventory_df
+
+
+def run_thirty_day_business_simulation(
+    start_date=None,
+    days=30,
+    seed=None,
+    distributor_username=None,
+    progress_callback=None,
+):
+    """
+    30 დღის სიმულაცია: 33 ფილიალი, 200–1000 ვიზიტი/დღე, ალბათობით გაყიდვები → sales_log.csv.
+    ნაშთი < 20% ნომინალური მიზნისა → ავტომატური რესტოკი (მარაგი + deliveries_log, დრო სიმულაციის დღეზე).
+    """
+    ensure_auth_files()
+    rng = random.Random(seed if seed is not None else random.randrange(1, 10**9))
+    dist_user = str(distributor_username or DEBUG_SIM_DISTRIBUTOR_USERNAME)
+    mapping_data = load_mapping()
+    company = str(mapping_data.get("user_company", {}).get(dist_user, "Ifkli"))
+
+    ensure_directory_stores_have_inventory_rows()
+    get_cached_store_directory_names.clear()
+    df = load_data()
+    if df.empty:
+        return {"ok": False, "error": "Product.csv.txt ცარიელია."}
+
+    stores = list(get_cached_store_directory_names())
+    if not stores:
+        return {"ok": False, "error": "stores_directory.csv ცარიელია."}
+
+    df = ensure_data_structure(df.copy())
+    nominal = {}
+    for _, r in df.iterrows():
+        sn = str(r["Store_Name"]).strip()
+        pn = str(r["Product_Name"]).strip()
+        c0 = int(pd.to_numeric(r["Current_Stock"], errors="coerce") or 0)
+        nominal[(sn, pn)] = max(28, int(c0 * 1.35) + rng.randint(0, 15))
+
+    if start_date is None:
+        end_anchor = datetime.now().date()
+        start_d = end_anchor - timedelta(days=days - 1)
+    else:
+        start_d = start_date if isinstance(start_date, date) else pd.to_datetime(start_date).date()
+
+    sales_rows = []
+    restock_count = 0
+    customer_visits = 0
+
+    for di in range(days):
+        sim_date = start_d + timedelta(days=di)
+        day_rng = random.Random(rng.randint(0, 2**30))
+
+        for store in stores:
+            smask = df["Store_Name"].astype(str).str.strip() == store
+            idx_list = df.index[smask].tolist()
+            if not idx_list:
+                continue
+            n_cust = day_rng.randint(200, 1000)
+            customer_visits += n_cust
+            for _visit in range(n_cust):
+                idx = day_rng.choice(idx_list)
+                cur = int(pd.to_numeric(df.at[idx, "Current_Stock"], errors="coerce") or 0)
+                if cur <= 0:
+                    continue
+                prod = str(df.at[idx, "Product_Name"]).strip()
+                p_buy = 0.035 + min(0.14, (cur / 160.0) * 0.09)
+                if day_rng.random() >= p_buy:
+                    continue
+                qty = day_rng.randint(1, min(3, cur))
+                sp = float(pd.to_numeric(df.at[idx, "Selling_Price"], errors="coerce") or 0.0)
+                cp = float(pd.to_numeric(df.at[idx, "Cost_Price"], errors="coerce") or 0.0)
+                if sp <= 0:
+                    sp = 2.0
+                if cp <= 0:
+                    cp = round(sp * 0.58, 2)
+                sec = day_rng.randint(0, 86399)
+                sale_ts = datetime.combine(sim_date, datetime.min.time()) + timedelta(seconds=int(sec))
+                rev = float(qty) * sp
+                profit = float(qty) * (sp - cp)
+                sales_rows.append(
+                    {
+                        "Timestamp": sale_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                        "Date": sim_date.strftime("%Y-%m-%d"),
+                        "Store": store,
+                        "Product": prod,
+                        "Qty": int(qty),
+                        "Selling_Price": sp,
+                        "Cost_Price": cp,
+                        "Revenue": rev,
+                        "Profit": profit,
+                    }
+                )
+                df.at[idx, "Current_Stock"] = cur - qty
+
+        restock_ops = []
+        for idx in list(df.index):
+            sn = str(df.at[idx, "Store_Name"]).strip()
+            pn = str(df.at[idx, "Product_Name"]).strip()
+            key = (sn, pn)
+            nom = int(nominal.get(key, 40))
+            cur2 = int(pd.to_numeric(df.at[idx, "Current_Stock"], errors="coerce") or 0)
+            thresh = max(1, int(math.ceil(0.2 * nom)))
+            if cur2 < thresh:
+                add = max(0, nom - cur2)
+                if add > 0:
+                    restock_ops.append((sn, pn, add))
+
+        for sn, pn, add in restock_ops:
+            m = (df["Store_Name"].astype(str).str.strip() == sn) & (df["Product_Name"].astype(str).str.strip() == pn)
+            if not m.any():
+                continue
+            ridx = df[m].index[0]
+            sp = float(pd.to_numeric(df.at[ridx, "Selling_Price"], errors="coerce") or 2.0)
+            cp = float(pd.to_numeric(df.at[ridx, "Cost_Price"], errors="coerce") or round(sp * 0.58, 2))
+            df = ensure_product_row(df, sn, pn, int(add), cp, sp)
+            restock_ts = datetime.combine(sim_date, datetime.min.time()) + timedelta(
+                hours=17, minutes=int(day_rng.randint(3, 55))
+            )
+            append_delivery_log(
+                dist_user,
+                company,
+                sn,
+                pn,
+                int(add),
+                sp,
+                at_time=restock_ts,
+                rs_status="Sim-30d-Restock",
+            )
+            restock_count += 1
+
+        if progress_callback:
+            progress_callback((di + 1) / float(days))
+
+    new_sales = pd.DataFrame(sales_rows)
+    if os.path.exists(SALES_LOG_FILE):
+        try:
+            existing = pd.read_csv(SALES_LOG_FILE)
+        except Exception:
+            existing = pd.DataFrame()
+    else:
+        existing = pd.DataFrame()
+    if existing.empty:
+        combined = new_sales
+    else:
+        combined = pd.concat([existing, new_sales], ignore_index=True)
+    for col in ["Timestamp", "Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"]:
+        if col not in combined.columns:
+            combined[col] = "" if col in ["Timestamp", "Date", "Store", "Product"] else 0
+    safe_write_csv(combined, SALES_LOG_FILE)
+
+    df = recalc_metrics(ensure_data_structure(df))
+    save_data(df)
+
+    month_end = start_d + timedelta(days=days - 1)
+    users = load_users()
+    dist_row = next((u for u in users if str(u.get("username", "")) == dist_user), {})
+    cr = float(dist_row.get("commission_rate", 0) or 0)
+    del_df = load_delivery_log()
+    ret_df = load_return_log()
+    fin = calculate_salary(dist_user, del_df, ret_df, start_d, month_end, cr)
+    plan = get_user_monthly_sales_target(dist_row)
+    bonus = distributor_plan_bonus_estimate(plan, fin["net"])
+    revenue_sim = float(new_sales["Revenue"].sum()) if not new_sales.empty else 0.0
+
+    try:
+        mtime = os.path.getmtime(SALES_LOG_FILE)
+    except OSError:
+        mtime = 0.0
+    _cached_monthly_analytics_sales.clear()
+
+    return {
+        "ok": True,
+        "days": days,
+        "start_date": start_d.isoformat(),
+        "end_date": month_end.isoformat(),
+        "transactions": len(sales_rows),
+        "revenue": revenue_sim,
+        "restock_events": restock_count,
+        "customer_visits": customer_visits,
+        "distributor_net_deliveries": fin["net"],
+        "distributor_commission": fin["commission"],
+        "distributor_bonus": bonus,
+        "distributor_total_earnings": round(float(fin["commission"]) + float(bonus), 2),
+    }
 
 
 def get_low_stock_alerts(df, threshold=5):
@@ -2547,18 +2824,6 @@ sales_df_all = load_sales_log()
 audit_df_all = load_audit_log()
 mapping_data = load_mapping()
 master_df = st.session_state.df
-df, sales_df_all = apply_role_filters(master_df, sales_df_all, auth_user, mapping_data)
-role_scope = get_role_scope(auth_user, mapping_data)
-df, sales_df_all, audit_df_all = apply_global_data_lock(df, sales_df_all, audit_df_all, role_scope)
-
-# 2. ანალიტიკური გათვლები
-sales_cols = [f"Sales_Day{i}" for i in range(1, 8)]
-for col in sales_cols:
-    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-df["საშ. დღიური გაყიდვა"] = df[sales_cols].mean(axis=1).round(1)
-df["დარჩენილი დღე"] = (df["Current_Stock"] / df["საშ. დღიური გაყიდვა"].replace(0, 0.1)).round(1)
-df["დღე ვადის გასვლამდე"] = (pd.to_datetime(df["Expiry_Date"]) - datetime.now()).dt.days
 
 # --- მთავარი გვერდითა მენიუ ---
 st.sidebar.title("🎛️ მართვის პანელი")
@@ -2569,11 +2834,26 @@ if st.sidebar.button("გასვლა", use_container_width=True):
     st.session_state.auth_user = None
     st.rerun()
 
+if auth_user and str(auth_user.get("role")) == "Market":
+    _ms_shops = list(get_cached_store_directory_names())
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🏪 Market — მაღაზიის არჩევა")
+    if not _ms_shops:
+        st.sidebar.warning("stores_directory.csv ცარიელია.")
+    else:
+        st.sidebar.selectbox(
+            "რომელი ფილიალი გინდათ (33 ქსელი)",
+            _ms_shops,
+            key="market_store_pick_main",
+        )
+        st.sidebar.caption(f"საერთო ინვენტარი: `{SHARED_INVENTORY_FILE}` (= inventory / Product)")
+
 role = auth_user.get("role")
 if role == "Super_Admin":
     pages = [
         "🏢 კომპანიის მართვა",
         "🌍 გლობალური ანალიტიკა",
+        "📊 თვის ანალიტიკა",
         "🏠 მაღაზიის პანელი",
         "🛒 გაყიდვები",
         "📥 მარაგების მიღება",
@@ -2589,8 +2869,10 @@ elif role in ["Company_Operator", "Retail_Operator", "Supplier_Operator"]:
     pages = ["🛠 ოპერატორის პანელი", "📈 პროდუქტის ეფექტიანობა"]
 elif role == "Store_Manager":
     pages = ["🏠 მაღაზიის პანელი", "🛒 გაყიდვები"]
+elif role == "Market":
+    pages = ["🏪 ბაზრის პანელი", "📊 თვის ანალიტიკა"]
 elif role == "Distributor":
-    pages = ["🚚 აუცილებელი მიწოდებები"]
+    pages = ["🚚 აუცილებელი მიწოდებები", "📊 თვის ანალიტიკა"]
 else:
     pages = ["🏢 კომპანიის მართვა"]
 # Stable navigation: keep radio state separate from programmatic redirects.
@@ -2606,6 +2888,19 @@ page = st.sidebar.radio(
     index=pages.index(st.session_state.current_page),
 )
 st.session_state.current_page = page
+
+df, sales_df_all = apply_role_filters(master_df, sales_df_all, auth_user, mapping_data)
+role_scope = get_role_scope(auth_user, mapping_data)
+df, sales_df_all, audit_df_all = apply_global_data_lock(df, sales_df_all, audit_df_all, role_scope)
+
+# 2. ანალიტიკური გათვლები (ფილტრის შემდეგ)
+sales_cols = [f"Sales_Day{i}" for i in range(1, 8)]
+for col in sales_cols:
+    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+df["საშ. დღიური გაყიდვა"] = df[sales_cols].mean(axis=1).round(1)
+df["დარჩენილი დღე"] = (df["Current_Stock"] / df["საშ. დღიური გაყიდვა"].replace(0, 0.1)).round(1)
+df["დღე ვადის გასვლამდე"] = (pd.to_datetime(df["Expiry_Date"]) - datetime.now()).dt.days
 
 if role == "Distributor" and page == "🚚 აუცილებელი მიწოდებები":
     st.sidebar.markdown("---")
@@ -2695,6 +2990,27 @@ if role == "Super_Admin":
         st.session_state.daily_profit = 0.0
         st.session_state.profit_date = datetime.now().strftime("%Y-%m-%d")
         st.rerun()
+
+    if st.sidebar.button("🚀 Run 30-Day Simulation", use_container_width=True, key="btn_run_30d_sim"):
+        prog = st.sidebar.progress(0.0)
+
+        def _tick(p):
+            prog.progress(min(1.0, float(p)))
+
+        try:
+            summary = run_thirty_day_business_simulation(progress_callback=_tick)
+        finally:
+            prog.empty()
+        if summary.get("ok"):
+            st.session_state.df = load_data()
+            get_cached_store_directory_names.clear()
+            st.sidebar.success(
+                f"დასრულდა: {summary.get('transactions', 0)} გაყიდვა, "
+                f"₾ {summary.get('revenue', 0):,.2f}, რესტოკი: {summary.get('restock_events', 0)}."
+            )
+            st.rerun()
+        else:
+            st.sidebar.error(str(summary.get("error", "შეცდომა")))
 
 low_stock_threshold = 5
 low_stock_items = df[df["Current_Stock"] < low_stock_threshold]
@@ -2991,6 +3307,215 @@ elif page == "📍 ვიზიტები":
             ),
             use_container_width=True,
         )
+
+elif page == "🏪 ბაზრის პანელი":
+    st.title("🏪 ბაზრის პანელი")
+    ms = str(st.session_state.get("market_store_pick_main", "")).strip()
+    if not ms:
+        st.warning("გთხოვთ, გვერდითა პანელიდან აირჩიოთ თქვენი ფილიალი (Market).")
+    else:
+        st.caption(f"ფილიალი: **{ms}** · საერთო ინვენტარი: `{SHARED_INVENTORY_FILE}`")
+        today_d = datetime.now().date()
+        delivery_df_m = load_delivery_log()
+        inc_m = (
+            delivery_df_m[delivery_df_m["store"].astype(str) == ms].copy()
+            if not delivery_df_m.empty
+            else delivery_df_m
+        )
+        if not inc_m.empty and "timestamp" in inc_m.columns:
+            inc_m = inc_m.sort_values("timestamp", ascending=False)
+
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            st.metric("SKU / ხაზები", len(df))
+        with k2:
+            day_rev = 0.0
+            if not sales_df_all.empty and "Timestamp" in sales_df_all.columns:
+                day_rev = float(
+                    pd.to_numeric(
+                        sales_df_all.loc[sales_df_all["Timestamp"].dt.date == today_d, "Revenue"],
+                        errors="coerce",
+                    ).fillna(0).sum()
+                )
+            st.metric("დღევანდელი გაყიდვა (₾)", f"{day_rev:.2f}")
+        with k3:
+            st.metric("სულ ნაშთი (ერთ.)", int(df["Current_Stock"].sum()) if not df.empty else 0)
+
+        st.subheader("📦 მიმდინარე ინვენტარი")
+        if df.empty:
+            st.info("ამ ფილიალზე პროდუქტის ჩანაწერი არ არის — გაუშვით სინქი (load_data) ან დაელოდეთ მიწოდებას.")
+        else:
+            disp_m = df[
+                ["Product_Name", "Current_Stock", "Cost_Price", "Selling_Price", "დარჩენილი დღე"]
+            ].copy()
+            st.dataframe(disp_m, use_container_width=True, hide_index=True)
+
+        st.subheader("🛒 დღევანდელი გაყიდვები (sales_log)")
+        sday = (
+            sales_df_all[sales_df_all["Timestamp"].dt.date == today_d].copy()
+            if not sales_df_all.empty and "Timestamp" in sales_df_all.columns
+            else sales_df_all
+        )
+        if sday.empty:
+            st.caption("დღეს გაყიდვის ჩანაწერი არ არის.")
+        else:
+            st.dataframe(
+                sday[["Timestamp", "Product", "Qty", "Revenue", "Profit"]].rename(
+                    columns={
+                        "Timestamp": "დრო",
+                        "Product": "პროდუქტი",
+                        "Qty": "რაოდ.",
+                        "Revenue": "შემოსავალი",
+                        "Profit": "მოგება",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.subheader("📥 შემომავალი მიწოდებები (deliveries_log)")
+        if inc_m.empty:
+            st.caption("ჩანაწერი არ არის — დისტრიბუტორის დადასტურებული მიწოდება გამოჩნდება აქ.")
+        else:
+            show_m = inc_m.head(100)[
+                ["timestamp", "username", "product", "qty", "total_sales", "rs_status"]
+            ].rename(
+                columns={
+                    "timestamp": "დრო",
+                    "username": "დისტრიბუტორი",
+                    "product": "პროდუქტი",
+                    "qty": "რაოდ.",
+                    "total_sales": "ჯამი (₾)",
+                    "rs_status": "სტატუსი",
+                }
+            )
+            st.dataframe(show_m, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.subheader("➕ გაყიდვის ჩაწერა (ნაშთის შემცირება)")
+        if df.empty:
+            st.info("პროდუქტის სია ცარიელია.")
+        else:
+            with st.form("market_register_sale"):
+                prod_pick = st.selectbox("პროდუქტი", df["Product_Name"].astype(str).tolist())
+                sale_qty_in = st.number_input("რაოდენობა", min_value=1, value=1, step=1)
+                do_sale = st.form_submit_button("გაყიდვის შენახვა")
+            if do_sale:
+                m_idx = (master_df["Store_Name"].astype(str) == ms) & (
+                    master_df["Product_Name"].astype(str) == str(prod_pick)
+                )
+                if not m_idx.any():
+                    st.error("პროდუქტი ვერ მოიძებნა მთავარ მარაგში.")
+                else:
+                    ix = master_df[m_idx].index[0]
+                    cur_st = int(pd.to_numeric(master_df.at[ix, "Current_Stock"], errors="coerce") or 0)
+                    sq = min(int(sale_qty_in), cur_st)
+                    if sq < 1:
+                        st.warning("ნაშთი არასაკმარისია.")
+                    else:
+                        sp = float(pd.to_numeric(master_df.at[ix, "Selling_Price"], errors="coerce") or 0.0)
+                        cp = float(pd.to_numeric(master_df.at[ix, "Cost_Price"], errors="coerce") or 0.0)
+                        st.session_state.daily_profit += (sp - cp) * sq
+                        save_sale(
+                            sale_date=datetime.now(),
+                            store=ms,
+                            product=str(prod_pick),
+                            qty=sq,
+                            selling_price=sp,
+                            cost_price=cp,
+                        )
+                        full_df = master_df.copy()
+                        full_df.at[ix, "Current_Stock"] = cur_st - sq
+                        full_df = recalc_metrics(ensure_data_structure(full_df))
+                        save_data(full_df)
+                        st.session_state.df = full_df
+                        st.success("გაყიდვა ჩაწერილია — ნაშთი განახლებულია.")
+                        st.rerun()
+
+elif page == "📊 თვის ანალიტიკა":
+    st.title("📊 თვის ანალიტიკა")
+    st.caption("ბოლო 30 დღის აგრეგატები: `sales_log.csv`, დისტრიბუტორის საკომისიო — `deliveries_log` / `returns_log`.")
+    try:
+        _sm_mtime = os.path.getmtime(SALES_LOG_FILE) if os.path.exists(SALES_LOG_FILE) else 0.0
+    except OSError:
+        _sm_mtime = 0.0
+    sales_an = _cached_monthly_analytics_sales(_sm_mtime)
+    end_an = datetime.now().date()
+    start_an = end_an - timedelta(days=29)
+    role_an = str(auth_user.get("role", ""))
+    ms_an = str(st.session_state.get("market_store_pick_main", "")).strip() if role_an == "Market" else ""
+    if role_an == "Market" and not ms_an:
+        st.warning("გვერდითა პანელიდან აირჩიეთ ფილიალი — ანალიტიკა ცარიელია.")
+
+    if not sales_an.empty and "Timestamp" in sales_an.columns:
+        sl_win = sales_an[
+            (sales_an["Timestamp"].dt.date >= start_an) & (sales_an["Timestamp"].dt.date <= end_an)
+        ].copy()
+    else:
+        sl_win = sales_an.iloc[0:0].copy()
+
+    if ms_an:
+        sl_win = sl_win[sl_win["Store"].astype(str) == ms_an]
+
+    total_rev_an = float(pd.to_numeric(sl_win["Revenue"], errors="coerce").fillna(0).sum()) if not sl_win.empty else 0.0
+    st.metric("ჯამური შემოსავალი (sales_log, 30 დღე)", format_gel_currency(total_rev_an))
+
+    if role_an != "Market":
+        if not sales_an.empty and "Timestamp" in sales_an.columns:
+            sl_all_top = sales_an[
+                (sales_an["Timestamp"].dt.date >= start_an) & (sales_an["Timestamp"].dt.date <= end_an)
+            ]
+            top_st = (
+                sl_all_top.groupby("Store", as_index=False)["Revenue"]
+                .sum()
+                .sort_values("Revenue", ascending=False)
+                .head(15)
+            )
+            st.subheader("ტოპ ფილიალები (შემოსავლით)")
+            if top_st.empty:
+                st.caption("მონაცემი არ არის.")
+            else:
+                st.dataframe(
+                    top_st.rename(columns={"Store": "ფილიალი", "Revenue": "შემოსავალი (₾)"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+    else:
+        st.info(f"ნაჩვენებია მხოლოდ **{ms_an}** — სრული ქსელის რეიტინგი ხელმისაწვდომია სუპერ-ადმინს.")
+
+    st.subheader("გაყიდვების ტრენდი (ხაზის დიაგრამა)")
+    if sl_win.empty:
+        st.caption("ამ ფილტრით მონაცემი არ არის.")
+    else:
+        sl_plot = sl_win.copy()
+        sl_plot["day"] = pd.to_datetime(sl_plot["Timestamp"]).dt.date
+        by_d = sl_plot.groupby("day", as_index=False)["Revenue"].sum()
+        st.line_chart(by_d.set_index("day"))
+
+    st.subheader("დისტრიბუტორი: ბონუსი + საკომისიო (30 დღე)")
+    dist_pick = str(auth_user.get("username", "")) if role_an == "Distributor" else DEBUG_SIM_DISTRIBUTOR_USERNAME
+    users_an = load_users()
+    row_an = next((u for u in users_an if str(u.get("username", "")) == dist_pick), {})
+    cr_an = float(row_an.get("commission_rate", 0) or 0)
+    plan_an = get_user_monthly_sales_target(row_an)
+    del_an = load_delivery_log()
+    ret_an = load_return_log()
+    fin_an = calculate_salary(dist_pick, del_an, ret_an, start_an, end_an, cr_an)
+    bonus_an = distributor_plan_bonus_estimate(plan_an, fin_an["net"])
+    tot_earn = round(float(fin_an["commission"]) + float(bonus_an), 2)
+    e1, e2, e3, e4 = st.columns(4)
+    with e1:
+        st.metric("ნეტო მიწოდება (პერიოდი)", format_gel_currency(fin_an["net"]))
+    with e2:
+        st.metric("საკომისიო", format_gel_currency(fin_an["commission"]))
+    with e3:
+        st.metric("გეგმის ბონუსი (ესტ.)", format_gel_currency(bonus_an))
+    with e4:
+        st.metric("ჯამური შემოსავალი (ბონუს + საკომისიო)", format_gel_currency(tot_earn))
+    st.caption(
+        f"პერიოდი: **{start_an}** — **{end_an}** · ანგარიშგება: **{dist_pick}** · გეგმა (users.csv): "
+        f"{format_gel_currency(plan_an) if plan_an > 0 else '—'}"
+    )
 
 elif page == "🚚 აუცილებელი მიწოდებები":
     render_distributor_dashboard(auth_user, mapping_data, sales_df_all)
