@@ -1,0 +1,55 @@
+mapping_type,key,value
+user_company,super_admin,Global
+user_company,admin,Global
+user_company,ifkli_admin,Ifkli
+user_company,ifkli_operator,Ifkli
+user_company,distributor_a,Ifkli
+company_product,Ifkli,Apple
+company_product,Ifkli,Banana
+company_product,Ifkli,Milk
+company_product,Ifkli,Bread
+company_product,Ifkli,Rice
+company_product,Ifkli,Cheese
+company_product,Ifkli,Yogurt
+company_product,Ifkli,Water
+company_product,Ifkli,Juice
+company_product,Ifkli,Pasta
+company_product,Ifkli,Honey
+company_product,Ifkli,Chocolate
+distributor_store,distributor_a,გლდანის ფილიალი
+distributor_store,distributor_a,ვაკის ფილიალი
+distributor_store,distributor_a,ნიკორა - ვაკე
+distributor_store,distributor_a,ორი ნაბიჯი - საბურთალო
+distributor_store,distributor_a,სპარი - გლდანი
+distributor_store,distributor_a,მაგნიტი - ისანი
+distributor_store,distributor_a,აგრო ჰაბი - დიდუბე
+distributor_store,distro,ნიკორა - ვაკე
+distributor_store,distro,ორი ნაბიჯი - საბურთალო
+distributor_store,distro,სპარი - გლდანი
+distributor_store,distro,მაგნიტი - ისანი
+distributor_store,distro,აგრო ჰაბი - დიდუბე
+distributor_store,distro,ფუდმარტი - ვარკეთილი
+distributor_store,distro,სუპერფუდი - ნაძალადევი
+distributor_store,distro,გურმე სახლი - მარჯანიშვილი
+distributor_store,distro,ევრო პროდუქტი - ჩუღურეთი
+distributor_store,distro,მარკეტი 24 - დიღომი
+distributor_store,distro,Nikora - საბურთალო
+distributor_store,distro,Nikora - ჩერხეიზარი
+distributor_store,distro,Spar - ვაკე
+distributor_store,distro,Spar - დიდუბე
+distributor_store,distro,Ori Nabiji - გლდანი
+distributor_store,distro,Ori Nabiji - ვარკეთილი
+distributor_store,distro,ნიკორა - ქუთაისი
+distributor_store,distro,სპარი - ბათუმი
+distributor_store,distro,ორი ნაბიჯი - რუსთავი
+distributor_store,distro,მაგნიტი - ზუგდიდი
+distributor_store,distro,ნიკორა - ბათუმი
+distributor_store,distro,სპარი - ქუთაისი
+distributor_store,distro,ორი ნაბიჯი - თელავი
+distributor_store,distro,Nikora - გორი
+distributor_store,distro,Spar - მარნეული
+distributor_store,distro,Ori Nabiji - ბორჯომი
+distributor_store,distro,ფუდმარტი - ხაშური
+distributor_store,distro,სუპერფუდი - ზესტაფონი
+distributor_store,distro,გურმე სახლი - სენაკი
+distributor_store,distro,ევრო პროდუქტი - ფოთი

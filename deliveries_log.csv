@@ -1,0 +1,4 @@
+id,timestamp,date,username,company,store,product,qty,unit_price,total_sales,waybill_no,rs_status
+del_1777063236877_2059,2026-04-25 00:40:36,2026-04-25,distro,Ifkli,ნიკორა - ვაკე,Apple,10,3.0,30.0,,Demo-Today-Seed
+del_1777063236900_3518,2026-04-25 00:40:36,2026-04-25,distro,Ifkli,სპარი - გლდანი,Milk,6,3.25,19.5,,Demo-Today-Seed
+del_1777063236916_3787,2026-04-25 00:40:36,2026-04-25,distro,Ifkli,ორი ნაბიჯი - საბურთალო,Bread,14,1.35,18.900000000000002,,Demo-Today-Seed

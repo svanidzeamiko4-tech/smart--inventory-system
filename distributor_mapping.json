@@ -1,0 +1,28 @@
+{
+  "distributor_a": {
+    "company": "Supplier_A",
+    "stores": [
+      "გლდანის ფილიალი",
+      "ვაკის ფილიალი",
+      "ნიკორა - ვაკე",
+      "ორი ნაბიჯი - საბურთალო",
+      "სპარი - გლდანი",
+      "მაგნიტი - ისანი",
+      "აგრო ჰაბი - დიდუბე"
+    ],
+    "products": [
+      "Apple",
+      "Banana",
+      "Milk",
+      "Bread",
+      "Rice",
+      "Cheese",
+      "Yogurt",
+      "Water",
+      "Juice",
+      "Pasta",
+      "Honey",
+      "Chocolate"
+    ]
+  }
+}
