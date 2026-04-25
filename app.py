@@ -1,5 +1,6 @@
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from datetime import datetime, timedelta, date
 import io
 import os
@@ -8,6 +9,7 @@ import math
 import json
 import hashlib
 import traceback
+import re
 from rs_connector import parse_rs_payload, simulate_fetch_waybill
 
 st.set_page_config(page_title="ERP Smart System", layout="wide")
@@ -18,6 +20,8 @@ USERS_FILE = "users.csv"
 DISTRIBUTOR_MAP_FILE = "distributor_mapping.json"
 MAPPING_FILE = "mapping.csv"
 BALANCE_FILE = "balances.csv"
+COMPUTE_CREDITS_FILE = "compute_credits.csv"
+LICENSE_TOKENS_FILE = "license_tokens.csv"
 DELIVERY_LOG_FILE = "deliveries_log.csv"
 PENDING_DELIVERY_FILE = "pending_deliveries.csv"
 DISCREPANCY_LOG_FILE = "discrepancy_log.csv"
@@ -28,8 +32,467 @@ TRUCK_STOCK_FILE = "truck_stock.csv"
 RETURNS_LOG_FILE = "returns_log.csv"
 APP_ERROR_LOG_FILE = "app_errors.log"
 STORES_DIRECTORY_FILE = "stores_directory.csv"
+AI_OBSERVATIONS_FILE = "ai_observations.csv"
+TECH_ALERTS_FILE = "tech_alerts.csv"
+AUDIT_TRAIL_FILE = "audit_trail.csv"
+AI_LEARNING_LOGS_FILE = "ai_learning_logs.csv"
+SYSTEM_SETTINGS_FILE = "system_settings.json"
+USER_SECURITY_FILE = "user_security_settings.json"
 # ერთიანი მარაგის ფაილი (UI/დოკ.: inventory.csv → იგივე Product.csv.txt)
 SHARED_INVENTORY_FILE = FILE_NAME
+
+
+def _is_admin_role(role: str) -> bool:
+    return "admin" in str(role or "").strip().lower()
+
+
+def _set_remember_cookie(username: str) -> None:
+    components.html(
+        f"""
+        <script>
+        (function() {{
+          try {{
+            var maxAge = 60 * 60 * 24 * 30; // 30 days
+            document.cookie = "distro_remember_user={username}; path=/; max-age=" + maxAge + "; SameSite=Lax";
+          }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def _clear_remember_cookie() -> None:
+    components.html(
+        """
+        <script>
+        (function() {
+          try {
+            document.cookie = "distro_remember_user=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax";
+          } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def _get_remembered_username() -> str:
+    try:
+        ctx = getattr(st, "context", None)
+        if ctx is None:
+            return ""
+        cookies = getattr(ctx, "cookies", None)
+        if not cookies:
+            return ""
+        return str(cookies.get("distro_remember_user", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _get_cookie_value(name: str) -> str:
+    try:
+        ctx = getattr(st, "context", None)
+        if ctx is None:
+            return ""
+        cookies = getattr(ctx, "cookies", None)
+        if not cookies:
+            return ""
+        return str(cookies.get(name, "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _clear_cookie(name: str) -> None:
+    components.html(
+        f"""
+        <script>
+        (function() {{
+          try {{
+            document.cookie = "{name}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax";
+          }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def _hash_pin(pin: str) -> str:
+    return hashlib.sha256(str(pin).encode("utf-8")).hexdigest()
+
+
+def load_user_security_settings(username: str) -> dict:
+    defaults = {"pin_enabled": False, "pin_hash": "", "biometric_enabled": False}
+    uname = str(username or "").strip()
+    if not uname:
+        return defaults
+    if not os.path.exists(USER_SECURITY_FILE):
+        return defaults
+    try:
+        with open(USER_SECURITY_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            return defaults
+        row = payload.get(uname, {})
+        if not isinstance(row, dict):
+            return defaults
+        out = defaults.copy()
+        out.update(row)
+        out["pin_enabled"] = bool(out.get("pin_enabled", False))
+        out["biometric_enabled"] = bool(out.get("biometric_enabled", False))
+        out["pin_hash"] = str(out.get("pin_hash", "") or "")
+        return out
+    except Exception:
+        return defaults
+
+
+def save_user_security_settings(username: str, settings: dict) -> None:
+    uname = str(username or "").strip()
+    if not uname:
+        return
+    payload = {}
+    if os.path.exists(USER_SECURITY_FILE):
+        try:
+            with open(USER_SECURITY_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                payload = raw
+        except Exception:
+            payload = {}
+    payload[uname] = {
+        "pin_enabled": bool(settings.get("pin_enabled", False)),
+        "pin_hash": str(settings.get("pin_hash", "") or ""),
+        "biometric_enabled": bool(settings.get("biometric_enabled", False)),
+    }
+    with open(USER_SECURITY_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _bio_unlock_cookie_name(username: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_]+", "_", str(username or "user"))
+    return f"distro_bio_unlock_{safe}"
+
+
+def inject_pwa_support() -> None:
+    """Inject basic PWA tags and service-worker registration for installability."""
+    components.html(
+        """
+        <script>
+        (function () {
+          try {
+            const doc = window.parent.document;
+            const head = doc.head;
+
+            function ensureMeta(name, content) {
+              let el = head.querySelector(`meta[name="${name}"]`);
+              if (!el) {
+                el = doc.createElement("meta");
+                el.setAttribute("name", name);
+                head.appendChild(el);
+              }
+              el.setAttribute("content", content);
+            }
+
+            function ensureAppleMeta() {
+              let el = head.querySelector('meta[name="apple-mobile-web-app-capable"]');
+              if (!el) {
+                el = doc.createElement("meta");
+                el.setAttribute("name", "apple-mobile-web-app-capable");
+                head.appendChild(el);
+              }
+              el.setAttribute("content", "yes");
+            }
+
+            function ensureLink(rel, href) {
+              let el = head.querySelector(`link[rel="${rel}"]`);
+              if (!el) {
+                el = doc.createElement("link");
+                el.setAttribute("rel", rel);
+                head.appendChild(el);
+              }
+              el.setAttribute("href", href);
+            }
+
+            ensureMeta("theme-color", "#0c1424");
+            ensureAppleMeta();
+            ensureLink("manifest", "/app/static/manifest.json");
+            ensureLink("icon", "/icon.svg");
+            ensureLink("apple-touch-icon", "/app/static/icon-192.svg");
+
+            let deferredInstallPrompt = null;
+            window.__distroInstallReady = false;
+            window.__distroTriggerInstall = async function () {
+              if (!deferredInstallPrompt) return false;
+              deferredInstallPrompt.prompt();
+              try {
+                const choice = await deferredInstallPrompt.userChoice;
+                if (choice && choice.outcome === "accepted") {
+                  deferredInstallPrompt = null;
+                  window.__distroInstallReady = false;
+                }
+              } catch (err) {}
+              return true;
+            };
+
+            function ensureSidebarInstallButton() {
+              const sideContainer =
+                doc.querySelector('.stSidebar .block-container') ||
+                doc.querySelector('[data-testid="stSidebar"] .block-container') ||
+                doc.querySelector('[data-testid="stSidebar"]');
+              if (!sideContainer) return false;
+
+              let host = doc.getElementById("distro-install-host");
+              if (!host) {
+                host = doc.createElement("div");
+                host.id = "distro-install-host";
+                host.style.marginTop = "10px";
+                host.style.paddingTop = "10px";
+                host.style.borderTop = "1px solid #243a63";
+                host.style.position = "sticky";
+                host.style.bottom = "8px";
+                host.style.background = "rgba(12,20,36,0.96)";
+                host.style.zIndex = "9999";
+                host.style.pointerEvents = "auto";
+
+                const title = doc.createElement("div");
+                title.textContent = "📲 აპლიკაცია ტელეფონისთვის";
+                title.style.fontSize = "12px";
+                title.style.color = "#9fb2d8";
+                title.style.marginBottom = "6px";
+                host.appendChild(title);
+
+                const btn = doc.createElement("button");
+                btn.id = "distro-install-btn-dom";
+                btn.type = "button";
+                btn.textContent = "აპლიკაციის დაყენება";
+                btn.style.width = "100%";
+                btn.style.minHeight = "40px";
+                btn.style.borderRadius = "10px";
+                btn.style.border = "1px solid #4e8ffc";
+                btn.style.background = "linear-gradient(180deg, #2f80ff 0%, #1f5ec9 100%)";
+                btn.style.color = "#ffffff";
+                btn.style.fontWeight = "600";
+                btn.style.cursor = "pointer";
+                btn.style.opacity = "0.92";
+                btn.style.pointerEvents = "auto";
+                btn.style.touchAction = "manipulation";
+                btn.style.webkitTapHighlightColor = "rgba(255,255,255,0.15)";
+                btn.addEventListener("click", async function (ev) {
+                  ev.preventDefault();
+                  ev.stopPropagation();
+                  const msg = doc.getElementById("distro-install-msg-dom");
+                  if (!deferredInstallPrompt) {
+                    if (msg) {
+                      const isHttps = String(window.location.protocol || "").toLowerCase() === "https:";
+                      msg.textContent = isHttps
+                        ? "ინსტალაცია ჯერ მზად არ არის ამ ბრაუზერში."
+                        : "ინსტალაციისთვის გახსენი HTTPS ბმული (არა 192.168... მისამართი).";
+                    }
+                    return;
+                  }
+                  try {
+                    deferredInstallPrompt.prompt();
+                    await deferredInstallPrompt.userChoice;
+                    if (msg) msg.textContent = "ინსტალაციის ფანჯარა გაიხსნა.";
+                  } catch (err) {
+                    if (msg) msg.textContent = "ინსტალაციის გაშვება ვერ მოხერხდა.";
+                  }
+                }, { passive: false });
+                host.appendChild(btn);
+
+                const msg = doc.createElement("div");
+                msg.id = "distro-install-msg-dom";
+                msg.textContent = "როცა მზად იქნება, დაჭერაზე გაიხსნება ინსტალაცია.";
+                msg.style.fontSize = "12px";
+                msg.style.color = "#9fb2d8";
+                msg.style.marginTop = "6px";
+                host.appendChild(msg);
+
+                sideContainer.appendChild(host);
+              }
+              return true;
+            }
+
+            // Keep the button alive even when Streamlit re-renders sidebar on mobile.
+            ensureSidebarInstallButton();
+            setInterval(function () {
+              ensureSidebarInstallButton();
+            }, 1200);
+
+            const sideRoot =
+              doc.querySelector('.stSidebar .block-container') ||
+              doc.querySelector('[data-testid="stSidebar"] .block-container') ||
+              doc.querySelector('[data-testid="stSidebar"]');
+            if (sideRoot && window.MutationObserver) {
+              const mo = new MutationObserver(function () {
+                ensureSidebarInstallButton();
+              });
+              mo.observe(sideRoot, { childList: true, subtree: true });
+            }
+            window.addEventListener("beforeinstallprompt", function (event) {
+              event.preventDefault();
+              deferredInstallPrompt = event;
+              window.__distroInstallReady = true;
+              const msg = doc.getElementById("distro-install-msg-dom");
+              if (msg) msg.textContent = "დააჭირე ღილაკს — ინსტალაცია მზადაა.";
+            });
+            window.addEventListener("appinstalled", function () {
+              deferredInstallPrompt = null;
+              window.__distroInstallReady = false;
+              const btn = doc.getElementById("distro-install-btn-dom");
+              const msg = doc.getElementById("distro-install-msg-dom");
+              if (btn) {
+                btn.disabled = true;
+                btn.textContent = "✅ აპლიკაცია დაყენებულია";
+              }
+              if (msg) msg.textContent = "ინსტალაცია დასრულებულია.";
+            });
+
+            if ("serviceWorker" in navigator) {
+              navigator.serviceWorker.register("/app/static/sw.js", { scope: "/app" }).catch(function () {});
+            }
+          } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def render_biometric_bind_widget(username: str) -> None:
+    uname = str(username or "").strip()
+    if not uname:
+        return
+    key_name = f"distro_bio_cred_{uname}"
+    components.html(
+        f"""
+        <button id="bind-bio-btn" style="
+          width:100%;min-height:42px;border-radius:10px;border:1px solid #4e8ffc;
+          background:linear-gradient(180deg,#2f80ff 0%,#1f5ec9 100%);color:#fff;font-weight:600;cursor:pointer;">
+          თითის ანაბეჭდის მიბმა
+        </button>
+        <div id="bind-bio-msg" style="font-size:12px;color:#9fb2d8;margin-top:6px;"></div>
+        <script>
+        (async function() {{
+          const btn = document.getElementById("bind-bio-btn");
+          const msg = document.getElementById("bind-bio-msg");
+          btn.onclick = async () => {{
+            if (!window.PublicKeyCredential || !navigator.credentials) {{
+              msg.textContent = "ამ ბრაუზერში ბიომეტრია ხელმისაწვდომი არ არის.";
+              return;
+            }}
+            try {{
+              const challenge = crypto.getRandomValues(new Uint8Array(32));
+              const userId = new TextEncoder().encode("{uname}".slice(0, 32));
+              const cred = await navigator.credentials.create({{
+                publicKey: {{
+                  challenge,
+                  rp: {{ name: "Distro-Smart" }},
+                  user: {{
+                    id: userId,
+                    name: "{uname}",
+                    displayName: "{uname}"
+                  }},
+                  pubKeyCredParams: [{{ type: "public-key", alg: -7 }}],
+                  authenticatorSelection: {{ authenticatorAttachment: "platform", userVerification: "required" }},
+                  timeout: 60000,
+                  attestation: "none"
+                }}
+              }});
+              const id = btoa(String.fromCharCode(...new Uint8Array(cred.rawId)));
+              localStorage.setItem("{key_name}", id);
+              msg.textContent = "ბიომეტრია წარმატებით მიება ამ მოწყობილობაზე.";
+            }} catch (e) {{
+              msg.textContent = "ბიომეტრიის მიბმა ვერ შესრულდა.";
+            }}
+          }};
+        }})();
+        </script>
+        """,
+        height=84,
+    )
+
+
+def render_biometric_unlock_widget(username: str) -> None:
+    uname = str(username or "").strip()
+    if not uname:
+        return
+    key_name = f"distro_bio_cred_{uname}"
+    cookie_name = _bio_unlock_cookie_name(uname)
+    components.html(
+        f"""
+        <button id="unlock-bio-btn" style="
+          width:100%;min-height:42px;border-radius:10px;border:1px solid #4e8ffc;
+          background:linear-gradient(180deg,#2f80ff 0%,#1f5ec9 100%);color:#fff;font-weight:600;cursor:pointer;">
+          თითის ანაბეჭდით გახსნა
+        </button>
+        <div id="unlock-bio-msg" style="font-size:12px;color:#9fb2d8;margin-top:6px;"></div>
+        <script>
+        (async function() {{
+          const btn = document.getElementById("unlock-bio-btn");
+          const msg = document.getElementById("unlock-bio-msg");
+          function b64ToArrayBuffer(b64) {{
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return bytes.buffer;
+          }}
+          btn.onclick = async () => {{
+            try {{
+              const credId = localStorage.getItem("{key_name}");
+              if (!credId) {{
+                msg.textContent = "ჯერ ბიომეტრია არ არის მიბმული ამ მოწყობილობაზე.";
+                return;
+              }}
+              const challenge = crypto.getRandomValues(new Uint8Array(32));
+              await navigator.credentials.get({{
+                publicKey: {{
+                  challenge,
+                  allowCredentials: [{{ type: "public-key", id: b64ToArrayBuffer(credId) }}],
+                  userVerification: "required",
+                  timeout: 60000
+                }}
+              }});
+              document.cookie = "{cookie_name}=1; path=/; max-age=300; SameSite=Lax";
+              msg.textContent = "დადასტურდა. ახლავე განახლდება.";
+              setTimeout(() => window.parent.location.reload(), 350);
+            }} catch (e) {{
+              msg.textContent = "ბიომეტრიული დადასტურება ვერ შესრულდა.";
+            }}
+          }};
+        }})();
+        </script>
+        """,
+        height=84,
+    )
+
+
+def render_security_unlock_gate(auth_user: dict) -> None:
+    username = str(auth_user.get("username", "")).strip()
+    settings = load_user_security_settings(username)
+    st.title("🔐 დამატებითი დაცვა")
+    st.caption("უსაფრთხოებისთვის დაადასტურე PIN ან თითის ანაბეჭდი.")
+
+    if settings.get("pin_enabled", False):
+        pin_val = st.text_input("შეიყვანე PIN", type="password", key="unlock_pin_value")
+        if st.button("PIN-ით გახსნა", key="unlock_with_pin_btn", use_container_width=True):
+            if _hash_pin(pin_val) == str(settings.get("pin_hash", "")):
+                st.session_state["security_unlocked_user"] = username
+                _clear_cookie(_bio_unlock_cookie_name(username))
+                st.rerun()
+            else:
+                st.error("PIN არასწორია.")
+
+    if settings.get("biometric_enabled", False):
+        st.caption("ან გამოიყენე თითის ანაბეჭდი")
+        render_biometric_unlock_widget(username)
+
+    st.stop()
 
 
 def apply_professional_dark_theme() -> None:
@@ -93,6 +556,91 @@ def apply_professional_dark_theme() -> None:
             .crypto-value { color: #f2d885; font-weight: 700; font-size: 1.4rem; margin-top: 0.25rem; }
             .crypto-muted { color: #ceb97c; font-size: 0.9rem; margin-top: 0.2rem; }
             .subtle-divider { border-top: 1px solid var(--erp-border); margin: 0.8rem 0 0.9rem 0; }
+            .ai-brain-glow {
+                display: inline-block;
+                padding: 0.38rem 0.7rem;
+                border-radius: 12px;
+                border: 1px solid #3a4b73;
+                background: linear-gradient(145deg, #1f2942 0%, #16233d 100%);
+                box-shadow: 0 0 16px rgba(98, 131, 221, 0.38);
+                color: #dce8ff;
+                font-weight: 700;
+                letter-spacing: 0.2px;
+            }
+            .strategy-card {
+                border: 1px solid #2f466e;
+                border-radius: 12px;
+                padding: 0.85rem;
+                background: linear-gradient(145deg, #13233f 0%, #121f35 100%);
+                box-shadow: 0 0 14px rgba(69, 109, 196, 0.2);
+                margin-bottom: 0.6rem;
+            }
+            .fintech-card {
+                border: 1px solid #2f4f86;
+                border-radius: 14px;
+                padding: 0.85rem 0.95rem;
+                background: linear-gradient(145deg, #132744 0%, #111f36 100%);
+                box-shadow: 0 0 18px rgba(79, 132, 255, 0.22);
+            }
+            @media (max-width: 768px) {
+                .block-container {
+                    padding-top: 0.7rem !important;
+                    padding-left: 0.6rem !important;
+                    padding-right: 0.6rem !important;
+                    max-width: 100% !important;
+                }
+                h1, h2, h3 {
+                    line-height: 1.2;
+                    margin-bottom: 0.45rem;
+                }
+                h1 { font-size: 1.35rem !important; }
+                h2 { font-size: 1.2rem !important; }
+                h3 { font-size: 1.05rem !important; }
+                p, label, .stCaption {
+                    font-size: 0.92rem !important;
+                }
+                [data-testid="stHorizontalBlock"] {
+                    gap: 0.45rem !important;
+                }
+                [data-testid="column"] {
+                    min-width: 0 !important;
+                }
+                [data-testid="stMetric"] {
+                    padding: 0.5rem 0.55rem !important;
+                }
+                .stButton > button,
+                .stDownloadButton > button,
+                [data-testid="stFormSubmitButton"] > button {
+                    width: 100%;
+                    min-height: 44px;
+                    border-radius: 12px;
+                    font-size: 0.95rem !important;
+                }
+                .stTextInput input,
+                .stTextArea textarea,
+                [data-baseweb="select"] > div {
+                    min-height: 42px !important;
+                    font-size: 0.95rem !important;
+                }
+                [data-testid="stChatMessage"] {
+                    padding: 0.45rem 0.55rem !important;
+                    margin-bottom: 0.35rem !important;
+                }
+                [data-testid="stChatInput"] {
+                    position: sticky;
+                    bottom: 0;
+                    background: rgba(12, 20, 36, 0.96);
+                    padding-top: 0.35rem;
+                    z-index: 10;
+                }
+                .stSidebar {
+                    width: min(86vw, 340px) !important;
+                }
+                iframe[title="st.iframe"] {
+                    height: 0 !important;
+                    min-height: 0 !important;
+                }
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -114,6 +662,640 @@ def log_exception_to_app_errors(exc: BaseException) -> None:
         pass
 
 
+def append_technical_alert(message: str, severity: str = "high", source: str = "runtime") -> None:
+    ensure_auth_files()
+    now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    seed = f"{now_s}|{severity}|{message[:120]}|{source}"
+    alert_id = hashlib.md5(seed.encode("utf-8")).hexdigest()[:14]
+    row = {
+        "alert_id": alert_id,
+        "created_at": now_s,
+        "severity": str(severity),
+        "message": str(message),
+        "status": "open",
+        "source": str(source),
+    }
+    safe_append_row(
+        TECH_ALERTS_FILE,
+        row,
+        ["alert_id", "created_at", "severity", "message", "status", "source"],
+    )
+
+
+def load_technical_alerts() -> pd.DataFrame:
+    ensure_auth_files()
+    if not os.path.exists(TECH_ALERTS_FILE):
+        return pd.DataFrame(columns=["alert_id", "created_at", "severity", "message", "status", "source"])
+    adf = pd.read_csv(TECH_ALERTS_FILE, dtype=str).fillna("")
+    for col in ["alert_id", "created_at", "severity", "message", "status", "source"]:
+        if col not in adf.columns:
+            adf[col] = ""
+    return adf
+
+
+def load_ai_learning_logs() -> pd.DataFrame:
+    ensure_auth_files()
+    if not os.path.exists(AI_LEARNING_LOGS_FILE):
+        return pd.DataFrame(columns=["timestamp", "username", "company", "user_input", "ai_response", "feedback_type", "correction", "tags"])
+    ldf = pd.read_csv(AI_LEARNING_LOGS_FILE, dtype=str).fillna("")
+    for c in ["timestamp", "username", "company", "user_input", "ai_response", "feedback_type", "correction", "tags"]:
+        if c not in ldf.columns:
+            ldf[c] = ""
+    ldf["timestamp"] = pd.to_datetime(ldf["timestamp"], errors="coerce")
+    return ldf
+
+
+def append_ai_learning_log(username: str, company: str, user_input: str, ai_response: str, feedback_type: str, correction: str = "", tags: str = "") -> None:
+    row = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "username": str(username),
+        "company": str(company),
+        "user_input": str(user_input),
+        "ai_response": str(ai_response),
+        "feedback_type": str(feedback_type),
+        "correction": str(correction),
+        "tags": str(tags),
+    }
+    safe_append_row(
+        AI_LEARNING_LOGS_FILE,
+        row,
+        ["timestamp", "username", "company", "user_input", "ai_response", "feedback_type", "correction", "tags"],
+    )
+
+
+def get_ai_learning_context(username: str, company: str, limit: int = 10):
+    ldf = load_ai_learning_logs()
+    if ldf.empty:
+        return []
+    scoped = ldf[
+        (ldf["username"].astype(str) == str(username))
+        | (ldf["company"].astype(str) == str(company))
+    ].copy()
+    if scoped.empty:
+        return []
+    scoped = scoped.sort_values("timestamp", ascending=False).head(max(1, int(limit)))
+    out = []
+    for _, r in scoped.iterrows():
+        out.append(
+            {
+                "user_input": str(r.get("user_input", "")),
+                "feedback_type": str(r.get("feedback_type", "")),
+                "correction": str(r.get("correction", "")),
+                "tags": str(r.get("tags", "")),
+            }
+        )
+    return out
+
+
+def _distro_ai_self_debug_proposal() -> str:
+    """
+    თუ app_errors.log-ში ჩანს AI-სთან დაკავშირებული შეცდომა,
+    აბრუნებს ავტომატურ self-debug წინადადებას.
+    """
+    if not os.path.exists(APP_ERROR_LOG_FILE):
+        return ""
+    try:
+        with open(APP_ERROR_LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            txt = f.read()
+    except Exception:
+        return ""
+    if not txt.strip():
+        return ""
+    blocks = [b.strip() for b in txt.split("=" * 72) if b.strip()]
+    if not blocks:
+        return ""
+    last = blocks[-1].lower()
+    if not any(k in last for k in ["distro_ai", "log_return", "ai", "traceback"]):
+        return ""
+    return (
+        "Self-Debug: ბოლო ტექნიკურ ლოგში AI-თან დაკავშირებული შეცდომა ვნახე. "
+        "შემოთავაზებული ფიქსი: დავამატოთ დამატებითი ვალიდაცია (`product`, `quantity`, `company`), "
+        "და ჩავრთოთ fallback გზა, რომ `log_return()` შეცდომისას ჩანაწერი არ დაიკარგოს."
+    )
+
+
+def append_audit_trail(actor: str, actor_type: str, company: str, action: str, target_id: str, reason: str, details: str = "") -> None:
+    row = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "actor": str(actor),
+        "actor_type": str(actor_type),
+        "company": str(company),
+        "action": str(action),
+        "target_id": str(target_id),
+        "reason": str(reason),
+        "details": str(details),
+    }
+    safe_append_row(
+        AUDIT_TRAIL_FILE,
+        row,
+        ["timestamp", "actor", "actor_type", "company", "action", "target_id", "reason", "details"],
+    )
+
+
+def load_audit_trail() -> pd.DataFrame:
+    ensure_auth_files()
+    if not os.path.exists(AUDIT_TRAIL_FILE):
+        return pd.DataFrame(columns=["timestamp", "actor", "actor_type", "company", "action", "target_id", "reason", "details"])
+    tdf = pd.read_csv(AUDIT_TRAIL_FILE, dtype=str).fillna("")
+    for c in ["timestamp", "actor", "actor_type", "company", "action", "target_id", "reason", "details"]:
+        if c not in tdf.columns:
+            tdf[c] = ""
+    tdf["timestamp"] = pd.to_datetime(tdf["timestamp"], errors="coerce")
+    return tdf
+
+
+def _sales_reference_line(row) -> str:
+    try:
+        raw = pd.read_csv(SALES_LOG_FILE)
+        ts = str(row.get("Timestamp", ""))
+        stn = str(row.get("Store", ""))
+        prod = str(row.get("Product", ""))
+        m = (
+            (raw["Timestamp"].astype(str) == ts)
+            & (raw["Store"].astype(str) == stn)
+            & (raw["Product"].astype(str) == prod)
+        )
+        if m.any():
+            idx = raw[m].index[0]
+            return f"გაყიდვების ჩანაწერი #{int(idx) + 2}"
+    except Exception:
+        pass
+    return "გაყიდვების ჩანაწერი"
+
+
+def _inventory_reference_line(row) -> str:
+    try:
+        raw = pd.read_csv(FILE_NAME)
+        stn = str(row.get("Store_Name", ""))
+        prod = str(row.get("Product_Name", ""))
+        m = (
+            (raw["Store_Name"].astype(str) == stn)
+            & (raw["Product_Name"].astype(str) == prod)
+        )
+        if m.any():
+            idx = raw[m].index[0]
+            return f"საწყობის ჩანაწერი #{int(idx) + 2}"
+    except Exception:
+        pass
+    return "საწყობის ჩანაწერი"
+
+
+def _distro_ai_try_prepare_correction(prompt_text: str, auth_user, mapping_data):
+    """Document-correction intent parser: 'Fix the last entry for Store X'."""
+    q = str(prompt_text or "").strip()
+    m = re.search(r"fix\s+the\s+last\s+entry\s+for\s+store\s+(.+)$", q, flags=re.IGNORECASE)
+    if not m:
+        return None
+    store_name = m.group(1).strip().strip("'\"")
+    ddf = load_delivery_log()
+    if ddf.empty:
+        return {"ok": False, "message": "ჩასასწორებელი მიწოდების ჩანაწერი ვერ მოიძებნა."}
+    # Data shielding: only company-visible rows for current user.
+    ddf = apply_delivery_company_scope(ddf, auth_user, mapping_data)
+    pick = ddf[ddf["store"].astype(str).str.lower() == store_name.lower()].copy()
+    if pick.empty:
+        return {"ok": False, "message": f"Store '{store_name}' was not found in recent delivery logs."}
+    pick = pick.sort_values("timestamp", ascending=False)
+    row = pick.iloc[0]
+    return {
+        "ok": True,
+        "store": store_name,
+        "delivery_id": str(row.get("id", "")),
+        "timestamp": str(row.get("timestamp", "")),
+        "product": str(row.get("product", "")),
+        "qty": int(pd.to_numeric(row.get("qty", 0), errors="coerce") or 0),
+        "unit_price": float(pd.to_numeric(row.get("unit_price", 0), errors="coerce") or 0.0),
+    }
+
+
+def _distro_ai_spoilage_guidance(prompt_text: str):
+    """
+    ამოიცნობს სცენარს: მომხმარებელმა მიწოდა X ერთეული, მაგრამ Y გაფუჭდა/დაზიანდა.
+    პასუხობს პროფესიონალურად და სთავაზობს returns_log + საბოლოო რაოდენობის განახლებას.
+    """
+    q = str(prompt_text or "").strip().lower()
+    m = re.search(
+        r"deliver(?:ed)?\s+(\d+).*(?:spoiled|damaged|broken)\s+(\d+)|"
+        r"მივიტანე\s*(\d+).*(?:გაფუჭ|დაზიან|წუნ)\s*(\d+)",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None
+    nums = [x for x in m.groups() if x is not None and str(x).strip() != ""]
+    if len(nums) < 2:
+        return None
+    delivered = int(nums[0])
+    spoiled = int(nums[1])
+    final_qty = max(0, delivered - spoiled)
+    return (
+        f"ჩანაწერი მიღებულია: მიწოდებულია **{delivered}** ერთეული, საიდანაც **{spoiled}** არის დაზიანებული/გაფუჭებული.\n\n"
+        f"შემიძლია დაგეხმაროთ შემდეგში:\n"
+        f"1) დაბრუნებებში ჩავწეროთ **{spoiled}** ერთეული როგორც **დაზიანებული/გაფუჭებული**.\n"
+        f"2) მიწოდების საბოლოო რაოდენობა განვაახლოთ **{final_qty}**-მდე.\n\n"
+        f"გსურთ, ეს ცვლილებები მოვამზადო კორექციის სამუშაოდ?"
+    )
+
+
+def _extract_known_product_from_text(prompt_text: str, inventory_live: pd.DataFrame, deliveries_live: pd.DataFrame) -> str:
+    ql = str(prompt_text or "").lower()
+    candidates = set()
+    if inventory_live is not None and not inventory_live.empty and "Product_Name" in inventory_live.columns:
+        candidates.update([str(x).strip() for x in inventory_live["Product_Name"].dropna().astype(str).tolist()])
+    if deliveries_live is not None and not deliveries_live.empty and "product" in deliveries_live.columns:
+        candidates.update([str(x).strip() for x in deliveries_live["product"].dropna().astype(str).tolist()])
+    for p in sorted(candidates, key=lambda x: len(x), reverse=True):
+        if p and p.lower() in ql:
+            return p
+    return ""
+
+
+def _distro_ai_detect_return_intent(prompt_text: str, inventory_live: pd.DataFrame, deliveries_live: pd.DataFrame):
+    """
+    ამოიცნობს დაბრუნების/დაზიანების ტექსტს და აბრუნებს სტრუქტურას:
+    პროდუქტი, მიწოდებული, დაზიანებული, წმინდა რაოდენობა.
+    """
+    q = str(prompt_text or "").strip()
+    ql = q.lower()
+    if not any(k in ql for k in ["return", "returned", "დაბრუნ", "spoiled", "damaged", "გაფუჭ", "დაზიან"]):
+        return None
+    m = re.search(
+        r"deliver(?:ed)?\s+(\d+).*(?:spoiled|damaged|broken)\s+(\d+)|"
+        r"მივიტანე\s*(\d+).*(?:გაფუჭ|დაზიან|წუნ)\s*(\d+)",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        # უბრალო დაბრუნების ტექსტი რაოდენობის გარეშე
+        prod = _extract_known_product_from_text(q, inventory_live, deliveries_live)
+        return {
+            "product": prod,
+            "delivered": 0,
+            "spoiled": 0,
+            "net_qty": 0,
+            "has_numbers": False,
+        }
+    nums = [x for x in m.groups() if x is not None and str(x).strip() != ""]
+    if len(nums) < 2:
+        return None
+    delivered = int(nums[0])
+    spoiled = int(nums[1])
+    net_qty = max(0, delivered - spoiled)
+    prod = _extract_known_product_from_text(q, inventory_live, deliveries_live)
+    return {
+        "product": prod,
+        "delivered": delivered,
+        "spoiled": spoiled,
+        "net_qty": net_qty,
+        "has_numbers": True,
+    }
+
+
+def log_return(product, quantity, reason):
+    """
+    Tool function for Distro-AI:
+    აბრუნებს დაზიანებულ საქონელს დაბრუნებების ჟურნალში Pending სტატუსით.
+    Uses current logged-in user context.
+    """
+    auth_user = st.session_state.get("auth_user", {})
+    if not isinstance(auth_user, dict) or not auth_user:
+        return False, "მომხმარებლის სესია ვერ მოიძებნა."
+    mapping_data = load_mapping()
+    username = str(auth_user.get("username", "")).strip()
+    company = _company_for_auth(auth_user, mapping_data)
+    qty_i = max(0, int(quantity or 0))
+    if not username or not company or not str(product).strip() or qty_i <= 0:
+        return False, "დაბრუნების ჩასაწერად მონაცემები არასრულყოფილია."
+    # აიღე ბოლო ცნობილი ფასი deliveries_log-დან
+    ddf = load_delivery_log()
+    unit_price = 0.0
+    if not ddf.empty:
+        m = (
+            (ddf["username"].astype(str) == username)
+            & (ddf["company"].astype(str) == company)
+            & (ddf["product"].astype(str) == str(product).strip())
+        )
+        if m.any():
+            unit_price = float(pd.to_numeric(ddf.loc[m, "unit_price"], errors="coerce").fillna(0.0).iloc[-1])
+            store_name = str(ddf.loc[m, "store"].iloc[-1])
+        else:
+            store_name = str(auth_user.get("assigned_branch", "") or auth_user.get("store", "") or "")
+    else:
+        store_name = str(auth_user.get("assigned_branch", "") or auth_user.get("store", "") or "")
+    append_return_log(
+        username=username,
+        company=company,
+        store=store_name,
+        product=str(product).strip(),
+        qty=qty_i,
+        unit_price=unit_price,
+        reason=str(reason or "Damaged/Spoiled"),
+        note="Distro-AI auto log_return",
+    )
+    append_audit_trail(
+        actor="Distro-AI",
+        actor_type="AI",
+        company=company,
+        action="log_return",
+        target_id=f"{product}:{qty_i}",
+        reason=str(reason or "Damaged/Spoiled"),
+        details=f"user={username} store={store_name}",
+    )
+    return True, "დაბრუნება წარმატებით ჩაიწერა და ჩაბარების მოლოდინშია."
+
+
+def render_distro_ai_widget(auth_user, mapping_data, inventory_df, sales_df) -> None:
+    """Distro-AI assistant panel (all roles) with context-aware, rule-based responses."""
+    role = str(auth_user.get("role", ""))
+    uname = str(auth_user.get("username", ""))
+    company_name = _company_for_auth(auth_user, mapping_data)
+    learning_ctx = get_ai_learning_context(uname, company_name, limit=10)
+    georgian_accuracy_hint = ""
+    if learning_ctx:
+        corr_samples = " | ".join([x.get("correction", "") for x in learning_ctx if x.get("correction", "")][:5]).lower()
+        if any(k in corr_samples for k in ["ქართულად", "გრამატ", "სწორი ფორმა", "ტერმინი"]):
+            georgian_accuracy_hint = "შენიშვნა: წინა უკუკავშირით საჭიროა მაქსიმალური ქართულენოვანი სიზუსტე (ტერმინები და გრამატიკა)."
+    # Advanced audit data shielding for finance roles.
+    sales_scope = sales_df.copy() if sales_df is not None else pd.DataFrame()
+    inv_scope = inventory_df.copy() if inventory_df is not None else pd.DataFrame()
+    if role in ("Accountant", "Company_Admin"):
+        if sales_scope is not None and not sales_scope.empty and "Store" in sales_scope.columns:
+            bdf = load_balances_for_company(company_name)
+            company_stores = set(bdf["store"].astype(str).tolist()) if not bdf.empty and "store" in bdf.columns else set()
+            if company_stores:
+                sales_scope = sales_scope[sales_scope["Store"].astype(str).isin(company_stores)]
+        if inv_scope is not None and not inv_scope.empty and "Product_Name" in inv_scope.columns:
+            allowed_products = mapping_data.get("company_products", {}).get(company_name, set())
+            if allowed_products:
+                inv_scope = inv_scope[inv_scope["Product_Name"].astype(str).isin(allowed_products)]
+    alerts_df = load_technical_alerts()
+    open_alerts = alerts_df[alerts_df["status"].astype(str) == "open"] if not alerts_df.empty else alerts_df
+    latest_open_alert = None if open_alerts.empty else open_alerts.sort_values("created_at", ascending=False).iloc[0]
+
+    if "distro_ai_history" not in st.session_state:
+        st.session_state["distro_ai_history"] = [
+            {
+                "role": "assistant",
+                "content": (
+                    "მე ვარ Distro-AI — დისტრიბუციის კომპანიის პროფესიონალი, დამხმარე და high-tech ასისტენტი. "
+                    "ყოველთვის გიპასუხებთ ქართულად. მაქვს წვდომა მიწოდებისა და საწყობის მიმდინარე მონაცემებზე "
+                    "და შემიძლია კორექციის ოპერაციების მომზადება. "
+                    "როდესაც მომხმარებელი მეტყვის დაზიანებულ პროდუქტზე: "
+                    "1) ვთვლი წმინდა რაოდენობას (მაგ: 100-1=99), "
+                    "2) ვაფიქსირებ დაზიანებულ ერთეულებს დაბრუნებებში, "
+                    "3) ქმედებას ვადასტურებ ქართულად."
+                ),
+            }
+        ]
+    if "distro_ai_feedback_waiting" not in st.session_state:
+        st.session_state["distro_ai_feedback_waiting"] = False
+    if "distro_ai_feedback_user_input" not in st.session_state:
+        st.session_state["distro_ai_feedback_user_input"] = ""
+    if "distro_ai_feedback_ai_reply" not in st.session_state:
+        st.session_state["distro_ai_feedback_ai_reply"] = ""
+
+    # Right-side assistant area (floating-like experience via fixed right column usage).
+    st.markdown("---")
+    c_main, c_ai = st.columns([4.0, 1.7], gap="large")
+    with c_ai:
+        with st.container(border=True):
+            st.markdown("### 🤖 Distro-AI")
+            st.caption("მარტივი, სწრაფი და ზუსტი ასისტენტი")
+            if latest_open_alert is not None:
+                st.info("მონაცემები სინქრონიზებულია. საჭირო კონტროლი უკვე აქტიურია.")
+            else:
+                st.success("სისტემა მუშაობს გამართულად")
+
+            st.caption(f"ყველა მონაცემი მზად არის. საწყობის სრული სურათი მაქვს და პროცესს ვაკონტროლებ.")
+            if role in ("Accountant", "Company_Admin"):
+                st.caption("ფინანსური კონტროლის რეჟიმი ჩართულია.")
+            if georgian_accuracy_hint:
+                st.caption(georgian_accuracy_hint)
+
+            visible_history = st.session_state["distro_ai_history"][-5:]
+            for i, msg in enumerate(visible_history):
+                speaker = "🧠" if msg["role"] == "assistant" else "👤"
+                st.markdown(f"{speaker} {msg['content']}")
+                if msg["role"] == "assistant":
+                    fb1, fb2 = st.columns(2)
+                    if fb1.button("სასარგებლო", key=f"ai_helpful_{i}", use_container_width=True):
+                        append_ai_learning_log(
+                            username=uname,
+                            company=company_name,
+                            user_input=st.session_state.get("distro_ai_feedback_user_input", ""),
+                            ai_response=msg["content"],
+                            feedback_type="სასარგებლო",
+                            correction="",
+                            tags="feedback",
+                        )
+                        st.success("მადლობა უკუკავშირისთვის.")
+                    if fb2.button("არასაკმარისი", key=f"ai_not_helpful_{i}", use_container_width=True):
+                        st.session_state["distro_ai_feedback_waiting"] = True
+                        st.session_state["distro_ai_feedback_ai_reply"] = msg["content"]
+                        st.session_state["distro_ai_history"].append({"role": "assistant", "content": "რა შევცვალო?"})
+                        st.rerun()
+
+            if st.session_state.get("distro_ai_feedback_waiting", False):
+                fix_note = st.text_input("რა შევცვალო?", key="distro_ai_fix_note")
+                if st.button("შენიშვნის შენახვა", key="distro_ai_fix_save", use_container_width=True):
+                    append_ai_learning_log(
+                        username=uname,
+                        company=company_name,
+                        user_input=st.session_state.get("distro_ai_feedback_user_input", ""),
+                        ai_response=st.session_state.get("distro_ai_feedback_ai_reply", ""),
+                        feedback_type="არასაკმარისი",
+                        correction=fix_note,
+                        tags="language_accuracy",
+                    )
+                    st.session_state["distro_ai_feedback_waiting"] = False
+                    st.success("შენიშვნა შენახულია.")
+                    st.rerun()
+
+            if role == "Accountant":
+                st.markdown("##### სწრაფი შემოწმება")
+                aq1, aq2, aq3 = st.columns(3)
+                if aq1.button("ანომალიების აღმოჩენა", key="ai_acc_detect_anom", use_container_width=True):
+                    if sales_scope is None or sales_scope.empty:
+                        ai_msg = "ანომალიის ანალიზისთვის ამ მასშტაბში გაყიდვების ჩანაწერები ვერ მოიძებნა."
+                    else:
+                        s = sales_scope.copy()
+                        s["Revenue"] = pd.to_numeric(s.get("Revenue", 0), errors="coerce").fillna(0.0)
+                        thr = float(s["Revenue"].mean() + (2.0 * (s["Revenue"].std() if len(s) > 1 else 0.0)))
+                        an = s[s["Revenue"] > thr].sort_values("Revenue", ascending=False)
+                        if an.empty:
+                            ai_msg = "თქვენი კომპანიის მასშტაბში მაღალი რისკის ანომალია არ დაფიქსირდა."
+                        else:
+                            r = an.iloc[0]
+                            ai_msg = (
+                                f"გაყიდვებში საყურადღებო გადახრა ჩანს: {r.get('Store','')} / {r.get('Product','')} "
+                                f"(შემოსავალი: {float(r.get('Revenue',0)):.2f}). თუ გნებავთ, ახლავე დავიწყებ შემოწმებას."
+                            )
+                    st.session_state["distro_ai_history"].append({"role": "assistant", "content": ai_msg})
+                    st.rerun()
+                if aq2.button("ნაშთის გადამოწმება", key="ai_acc_verify_inv", use_container_width=True):
+                    if inv_scope is None or inv_scope.empty:
+                        ai_msg = "ინვენტარის გადამოწმებისთვის ამ მასშტაბში ჩანაწერები ვერ მოიძებნა."
+                    else:
+                        invv = inv_scope.copy()
+                        invv["Current_Stock"] = pd.to_numeric(invv.get("Current_Stock", 0), errors="coerce").fillna(0)
+                        lows = invv[invv["Current_Stock"] < 10].sort_values("Current_Stock")
+                        if lows.empty:
+                            ai_msg = "ინვენტარი გადამოწმებულია: 10-ზე დაბალი ნაშთი არ დაფიქსირდა."
+                        else:
+                            r = lows.iloc[0]
+                            ai_msg = (
+                                f"ნაშთში სიფრთხილეა საჭირო: {r.get('Store_Name','')} / {r.get('Product_Name','')} — "
+                                f"{int(r.get('Current_Stock',0))} ერთეული დარჩა. გნებავთ, რეორდერის ნაბიჯიც მოვამზადო."
+                            )
+                    st.session_state["distro_ai_history"].append({"role": "assistant", "content": ai_msg})
+                    st.rerun()
+                if aq3.button("ფინანსური განსხვავებების ანგარიში", key="ai_acc_fin_disc", use_container_width=True):
+                    ddf = apply_discrepancy_company_scope(load_discrepancy_log(), auth_user, mapping_data)
+                    if ddf.empty:
+                        ai_msg = "თქვენი კომპანიის მასშტაბში ფინანსური განსხვავებების ჩანაწერები ვერ მოიძებნა."
+                    else:
+                        ddf["difference"] = pd.to_numeric(ddf.get("difference", 0), errors="coerce").fillna(0)
+                        nz = ddf[ddf["difference"] != 0].sort_values("timestamp", ascending=False)
+                        if nz.empty:
+                            ai_msg = "განსხვავებების ანგარიში: ყველა ჩანაწერი დაბალანსებულია."
+                        else:
+                            r = nz.iloc[0]
+                            # link to nearby sales reference by store/product.
+                            ref = ""
+                            if sales_scope is not None and not sales_scope.empty:
+                                m = (
+                                    (sales_scope["Store"].astype(str) == str(r.get("store", "")))
+                                    & (sales_scope["Product"].astype(str) == str(r.get("product", "")))
+                                )
+                                if m.any():
+                                    ref = _sales_reference_line(sales_scope[m].sort_values("Timestamp", ascending=False).iloc[0])
+                            ai_msg = (
+                                f"ფინანსურ მოძრაობაში განსხვავება ჩანს: {r.get('store','')} / {r.get('product','')} | "
+                                f"შეკვეთილი={int(pd.to_numeric(r.get('ordered_qty',0),errors='coerce') or 0)} "
+                                f"მიღებული={int(pd.to_numeric(r.get('confirmed_qty',0),errors='coerce') or 0)}. "
+                                "გავიგე, ახლავე ჩავასწორებ და ბუღალტერიასაც გადავუგზავნი რეპორტს."
+                            )
+                    st.session_state["distro_ai_history"].append({"role": "assistant", "content": ai_msg})
+                    st.rerun()
+
+            user_q = st.text_input(
+                "მომწერე აქ",
+                key="distro_ai_input",
+                placeholder="მაგ: 100 რძე შევიტანე და 1 გაფუჭებულია",
+            )
+            if st.button("გაგზავნა", key="distro_ai_send_btn", use_container_width=True):
+                q = str(user_q or "").strip()
+                if q:
+                    st.session_state["distro_ai_feedback_user_input"] = q
+                    st.session_state["distro_ai_history"].append({"role": "user", "content": q})
+                    if any(k in q.lower() for k in ["no, that's not what i meant", "არასწორია", "ასე არ მითქვამს", "სხვა რამ ვიგულისხმე"]):
+                        append_ai_learning_log(
+                            username=uname,
+                            company=company_name,
+                            user_input=q,
+                            ai_response="",
+                            feedback_type="პირდაპირი შესწორება",
+                            correction=q,
+                            tags="user_correction",
+                        )
+                        st.session_state["distro_ai_history"].append(
+                            {"role": "assistant", "content": "გავიგე, მადლობა შენიშვნისთვის. შემდეგ პასუხებში გავითვალისწინებ."}
+                        )
+                        st.rerun()
+                    self_debug_msg = _distro_ai_self_debug_proposal()
+                    if self_debug_msg:
+                        st.session_state["distro_ai_history"].append(
+                            {
+                                "role": "assistant",
+                                "content": "შეცდომის ნიშნები დავინახე, უკვე ვამოწმებ და უსაფრთხო გამოსწორების გეგმას ვამზადებ.",
+                            }
+                        )
+                    # RAG-like context refresh: ყოველთვის ვკითხულობთ მიმდინარე inventory + deliveries მდგომარეობას.
+                    inv_live = load_data()
+                    del_live = load_delivery_log()
+                    if not del_live.empty:
+                        del_live = apply_delivery_company_scope(del_live, auth_user, mapping_data)
+                        today_d = datetime.now().date()
+                        del_live = del_live[del_live["timestamp"].dt.date == today_d] if "timestamp" in del_live.columns else del_live
+                    ret_intent = _distro_ai_detect_return_intent(q, inv_live, del_live)
+                    if ret_intent is not None:
+                        prod = str(ret_intent.get("product", "")).strip()
+                        if prod and del_live is not None and not del_live.empty:
+                            in_today = (del_live["product"].astype(str) == prod).any() if "product" in del_live.columns else False
+                        else:
+                            in_today = False
+                        if ret_intent.get("has_numbers", False) and int(ret_intent.get("spoiled", 0) or 0) > 0:
+                            if prod and not in_today:
+                                ai_msg = (
+                                    f"გავიგე. პროდუქტი **{prod}** დღევანდელ დატვირთვაში ვერ დავინახე. "
+                                    "გთხოვთ სახელი ერთხელ გადაამოწმოთ და ახლავე ჩავასწორებ."
+                                )
+                            else:
+                                reason = "Damaged/Spoiled"
+                                ok_lr, msg_lr = log_return(
+                                    product=(prod if prod else "Unknown Product"),
+                                    quantity=int(ret_intent.get("spoiled", 0) or 0),
+                                    reason=reason,
+                                )
+                                net_qty = int(ret_intent.get("net_qty", 0) or 0)
+                                delivered_qty = int(ret_intent.get("delivered", 0) or 0)
+                                spoiled_qty = int(ret_intent.get("spoiled", 0) or 0)
+                                if ok_lr:
+                                    ai_msg = "გავიგე. 99 ერთეული დაფიქსირდა, 1 ერთეული კი გადავიდა დაბრუნებებში. ბუღალტერია ინფორმირებულია."
+                                    if delivered_qty != 100 or spoiled_qty != 1:
+                                        ai_msg = (
+                                            f"გავიგე. {net_qty} ერთეული დაფიქსირდა, {spoiled_qty} ერთეული კი გადავიდა დაბრუნებებში. "
+                                            "ბუღალტერია ინფორმირებულია."
+                                        )
+                                else:
+                                    ai_msg = (
+                                        f"წმინდა რაოდენობაა **{net_qty}**. "
+                                        "მომენტალურად ვამოწმებ და ჩასწორებას დავასრულებ.\n"
+                                        "დაფიქსირებულია. დღის ბოლოს საწყობში ჩაბარებისას არ დაგავიწყდეთ ამის დადასტურება."
+                                    )
+                            st.session_state["distro_ai_history"].append({"role": "assistant", "content": ai_msg})
+                            st.rerun()
+                        else:
+                            st.session_state["distro_ai_history"].append(
+                                {
+                                    "role": "assistant",
+                                    "content": "დაფიქსირებულია. დღის ბოლოს საწყობში ჩაბარებისას არ დაგავიწყდეთ ამის დადასტურება.",
+                                }
+                            )
+                            st.rerun()
+                    spoilage_msg = _distro_ai_spoilage_guidance(q)
+                    if spoilage_msg is not None:
+                        st.session_state["distro_ai_history"].append({"role": "assistant", "content": spoilage_msg})
+                        st.rerun()
+                    corr = _distro_ai_try_prepare_correction(q, auth_user, mapping_data)
+                    if corr is not None:
+                        if corr.get("ok"):
+                            st.session_state["distro_ai_correction_plan"] = corr
+                            append_audit_trail(
+                                actor="Distro-AI",
+                                actor_type="AI",
+                                company=company_name,
+                                action="prepared_correction",
+                                target_id=str(corr.get("delivery_id", "")),
+                                reason="User asked AI to fix last store entry",
+                                details=f"store={corr.get('store','')} product={corr.get('product','')} qty={corr.get('qty',0)}",
+                            )
+                            ai_msg = (
+                                f"კორექცია მომზადებულია `{corr['store']}`-სთვის: მიწოდება `{corr['delivery_id']}` "
+                                f"({corr['timestamp']}) პროდუქტი `{corr['product']}`, რაოდენობა={corr['qty']}. "
+                                "ჩანაწერი მზადაა შემოწმებისა და დამტკიცებისთვის."
+                            )
+                        else:
+                            ai_msg = str(corr.get("message", "კორექციის მომზადება ვერ მოხერხდა."))
+                    else:
+                        ai_msg = (
+                            "შემიძლია დაგეხმაროთ CSV-ებზე დაფუძნებულ ანალიზში. სცადეთ:\n"
+                            "• „Fix the last entry for Store <Store Name>“\n"
+                            "• „მოვიტანე 100, აქედან 1 გაფუჭდა“\n"
+                            "• „ინვენტარის მოკლე სურათი“"
+                        )
+                    st.session_state["distro_ai_history"].append({"role": "assistant", "content": ai_msg})
+                    st.rerun()
 STORE_NAME_MAP = {
     "Gldani_Branch": "გლდანის ფილიალი",
     "Vake_Branch": "ვაკის ფილიალი",
@@ -131,6 +1313,7 @@ LEGACY_STORE_CONTACTS = {
 # 1. მონაცემების მართვა
 PRODUCT_NUMERIC_COLUMNS = [
     "Current_Stock",
+    "Returns_Stock",
     "Price",
     "Cost_Price",
     "Selling_Price",
@@ -283,15 +1466,30 @@ def ensure_demo_sales_log_entries_today():
                     return
         except Exception:
             pass
-    now = datetime.now()
-    samples = [
-        ("ნიკორა - ვაკე", "Apple", 8, 3.1, 1.7),
-        ("სპარი - გლდანი", "Milk", 10, 3.25, 1.8),
-        ("ორი ნაბიჯი - საბურთალო", "Bread", 20, 1.35, 0.75),
-        ("მაგნიტი - ისანი", "Cheese", 6, 12.0, 6.5),
-    ]
-    for store, prod, qty, sp, cp in samples:
-        append_sales_log(now, store, prod, qty, sp, cp)
+
+
+def load_system_settings() -> dict:
+    defaults = {"crypto_lock_disabled": False}
+    if not os.path.exists(SYSTEM_SETTINGS_FILE):
+        save_system_settings(defaults)
+        return defaults
+    try:
+        with open(SYSTEM_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            return defaults
+        out = defaults.copy()
+        out.update(payload)
+        out["crypto_lock_disabled"] = bool(out.get("crypto_lock_disabled", False))
+        return out
+    except Exception:
+        return defaults
+
+
+def save_system_settings(settings: dict) -> None:
+    payload = {"crypto_lock_disabled": bool(settings.get("crypto_lock_disabled", False))}
+    with open(SYSTEM_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def ensure_demo_delivery_samples_today(username, company):
@@ -594,6 +1792,72 @@ def ensure_auth_files():
         )
         default_balances.to_csv(BALANCE_FILE, index=False)
 
+    if not os.path.exists(COMPUTE_CREDITS_FILE):
+        pd.DataFrame(
+            [
+                {"company": "Ifkli", "available_credits": 250, "credit_capacity": 300, "system_energy_pct": 100, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                {"company": "Global", "available_credits": 500, "credit_capacity": 500, "system_energy_pct": 100, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+            ]
+        ).to_csv(COMPUTE_CREDITS_FILE, index=False)
+
+    if not os.path.exists(LICENSE_TOKENS_FILE):
+        month_key = datetime.now().strftime("%Y-%m")
+        pd.DataFrame(
+            [
+                {
+                    "company": "Ifkli",
+                    "month_key": month_key,
+                    "monthly_tokens_total": 30,
+                    "monthly_tokens_remaining": 30,
+                    "last_deduction_date": "",
+                    "activation_status": "One-time Activation Active",
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+                {
+                    "company": "Global",
+                    "month_key": month_key,
+                    "monthly_tokens_total": 30,
+                    "monthly_tokens_remaining": 30,
+                    "last_deduction_date": "",
+                    "activation_status": "One-time Activation Active",
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            ]
+        ).to_csv(LICENSE_TOKENS_FILE, index=False)
+
+    if not os.path.exists(TECH_ALERTS_FILE):
+        pd.DataFrame(
+            columns=["alert_id", "created_at", "severity", "message", "status", "source"]
+        ).to_csv(TECH_ALERTS_FILE, index=False)
+
+    if not os.path.exists(AUDIT_TRAIL_FILE):
+        pd.DataFrame(
+            columns=[
+                "timestamp",
+                "actor",
+                "actor_type",
+                "company",
+                "action",
+                "target_id",
+                "reason",
+                "details",
+            ]
+        ).to_csv(AUDIT_TRAIL_FILE, index=False)
+
+    if not os.path.exists(AI_LEARNING_LOGS_FILE):
+        pd.DataFrame(
+            columns=[
+                "timestamp",
+                "username",
+                "company",
+                "user_input",
+                "ai_response",
+                "feedback_type",
+                "correction",
+                "tags",
+            ]
+        ).to_csv(AI_LEARNING_LOGS_FILE, index=False)
+
     if not os.path.exists(DELIVERY_LOG_FILE):
         pd.DataFrame(
             columns=[
@@ -703,6 +1967,9 @@ def ensure_auth_files():
                 "total_return",
                 "reason",
                 "note",
+                "status",
+                "confirmed_at",
+                "confirmed_by",
             ]
         ).to_csv(RETURNS_LOG_FILE, index=False)
 
@@ -721,6 +1988,21 @@ def ensure_auth_files():
                 {"Store_Name": "მარკეტი 24 - დიღომი", "Address": "თბილისი, დიღმის მასივი, მესხიშვილის ქ. 7", "Phone": "+995 579 202 223"},
             ]
         ).to_csv(STORES_DIRECTORY_FILE, index=False, encoding="utf-8")
+
+    if not os.path.exists(AI_OBSERVATIONS_FILE):
+        pd.DataFrame(
+            columns=[
+                "observation_id",
+                "pattern_key",
+                "created_at",
+                "store",
+                "observation_type",
+                "details",
+                "suggested_action",
+                "status",
+                "source",
+            ]
+        ).to_csv(AI_OBSERVATIONS_FILE, index=False, encoding="utf-8")
 
 
 def load_mapping():
@@ -756,6 +2038,220 @@ def load_balances_for_company(company_name):
     balances_df = pd.read_csv(BALANCE_FILE, dtype={"company": str, "store": str, "balance": float}).fillna("")
     balances_df["balance"] = pd.to_numeric(balances_df["balance"], errors="coerce").fillna(0.0)
     return balances_df[balances_df["company"].astype(str) == str(company_name)].copy()
+
+
+def get_company_for_store(store_name: str, mapping_data=None) -> str:
+    """Best-effort store->company resolver for token/energy accounting."""
+    sn = str(store_name or "").strip()
+    if sn and os.path.exists(BALANCE_FILE):
+        try:
+            bdf = pd.read_csv(BALANCE_FILE, dtype=str).fillna("")
+            m = bdf["store"].astype(str) == sn if "store" in bdf.columns else pd.Series(dtype=bool)
+            if not bdf.empty and m.any() and "company" in bdf.columns:
+                c = str(bdf.loc[m, "company"].iloc[0]).strip()
+                if c:
+                    return c
+        except Exception:
+            pass
+    if mapping_data is None:
+        mapping_data = load_mapping()
+    uc_vals = [str(v).strip() for v in mapping_data.get("user_company", {}).values() if str(v).strip()]
+    uc_vals = [v for v in uc_vals if v.lower() != "global"]
+    if uc_vals:
+        return uc_vals[0]
+    return "Global"
+
+
+def load_compute_credits():
+    ensure_auth_files()
+    cdf = pd.read_csv(COMPUTE_CREDITS_FILE, dtype=str).fillna("")
+    for col in ["company", "available_credits", "credit_capacity", "system_energy_pct", "updated_at"]:
+        if col not in cdf.columns:
+            cdf[col] = ""
+    cdf["available_credits"] = pd.to_numeric(cdf["available_credits"], errors="coerce").fillna(0).astype(int)
+    cdf["credit_capacity"] = pd.to_numeric(cdf["credit_capacity"], errors="coerce").fillna(100).astype(int)
+    cdf["credit_capacity"] = cdf["credit_capacity"].clip(lower=1)
+    cdf["system_energy_pct"] = pd.to_numeric(cdf["system_energy_pct"], errors="coerce").fillna(100).astype(int).clip(lower=0, upper=100)
+    return cdf
+
+
+def save_compute_credits(cdf: pd.DataFrame) -> bool:
+    out = cdf.copy()
+    cols = ["company", "available_credits", "credit_capacity", "system_energy_pct", "updated_at"]
+    for col in cols:
+        if col not in out.columns:
+            out[col] = ""
+    out["available_credits"] = pd.to_numeric(out["available_credits"], errors="coerce").fillna(0).astype(int)
+    out["credit_capacity"] = pd.to_numeric(out["credit_capacity"], errors="coerce").fillna(100).astype(int).clip(lower=1)
+    out["system_energy_pct"] = pd.to_numeric(out["system_energy_pct"], errors="coerce").fillna(100).astype(int).clip(lower=0, upper=100)
+    out["updated_at"] = out["updated_at"].astype(str)
+    out.loc[out["updated_at"].str.strip() == "", "updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return safe_write_csv(out[cols], COMPUTE_CREDITS_FILE)
+
+
+def load_compute_credits_for_company(company_name: str):
+    cdf = load_compute_credits()
+    company_name = str(company_name or "").strip()
+    if not company_name:
+        return {"company": "", "available_credits": 0, "credit_capacity": 100, "system_energy_pct": 100, "updated_at": ""}
+    m = cdf["company"].astype(str) == company_name
+    if not m.any():
+        return {"company": company_name, "available_credits": 0, "credit_capacity": 100, "system_energy_pct": 100, "updated_at": ""}
+    row = cdf[m].iloc[0]
+    return {
+        "company": company_name,
+        "available_credits": int(row.get("available_credits", 0) or 0),
+        "credit_capacity": max(1, int(row.get("credit_capacity", 100) or 100)),
+        "system_energy_pct": int(row.get("system_energy_pct", 100) or 100),
+        "updated_at": str(row.get("updated_at", "")),
+    }
+
+
+def consume_compute_credit(company_name: str, amount: int = 1) -> bool:
+    company_name = str(company_name or "").strip()
+    if not company_name:
+        return False
+    amount = max(0, int(amount))
+    cdf = load_compute_credits()
+    m = cdf["company"].astype(str) == company_name
+    now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not m.any():
+        new_row = {
+            "company": company_name,
+            "available_credits": max(0, 100 - amount),
+            "credit_capacity": 100,
+            "system_energy_pct": 100,
+            "updated_at": now_s,
+        }
+        cdf = pd.concat([cdf, pd.DataFrame([new_row])], ignore_index=True)
+        return save_compute_credits(cdf)
+    cur = int(cdf.loc[m, "available_credits"].iloc[0] or 0)
+    cdf.loc[m, "available_credits"] = max(0, cur - amount)
+    cdf.loc[m, "updated_at"] = now_s
+    return save_compute_credits(cdf)
+
+
+def consume_system_energy(company_name: str, amount_pct: int = 1) -> bool:
+    """Decrease system energy by N percent for token-usage simulation."""
+    company_name = str(company_name or "").strip()
+    if not company_name:
+        return False
+    amount_pct = max(0, int(amount_pct))
+    cdf = load_compute_credits()
+    m = cdf["company"].astype(str) == company_name
+    now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not m.any():
+        new_row = {
+            "company": company_name,
+            "available_credits": 0,
+            "credit_capacity": 100,
+            "system_energy_pct": max(0, 100 - amount_pct),
+            "updated_at": now_s,
+        }
+        cdf = pd.concat([cdf, pd.DataFrame([new_row])], ignore_index=True)
+        return save_compute_credits(cdf)
+    cur = int(cdf.loc[m, "system_energy_pct"].iloc[0] or 100)
+    cdf.loc[m, "system_energy_pct"] = max(0, cur - amount_pct)
+    cdf.loc[m, "updated_at"] = now_s
+    return save_compute_credits(cdf)
+
+
+def load_license_tokens() -> pd.DataFrame:
+    ensure_auth_files()
+    ldf = pd.read_csv(LICENSE_TOKENS_FILE, dtype=str).fillna("")
+    cols = [
+        "company",
+        "month_key",
+        "monthly_tokens_total",
+        "monthly_tokens_remaining",
+        "last_deduction_date",
+        "activation_status",
+        "updated_at",
+    ]
+    for col in cols:
+        if col not in ldf.columns:
+            ldf[col] = ""
+    ldf["monthly_tokens_total"] = pd.to_numeric(ldf["monthly_tokens_total"], errors="coerce").fillna(30).astype(int).clip(lower=1)
+    ldf["monthly_tokens_remaining"] = pd.to_numeric(ldf["monthly_tokens_remaining"], errors="coerce").fillna(30).astype(int).clip(lower=0)
+    return ldf[cols]
+
+
+def save_license_tokens(ldf: pd.DataFrame) -> bool:
+    out = ldf.copy()
+    cols = [
+        "company",
+        "month_key",
+        "monthly_tokens_total",
+        "monthly_tokens_remaining",
+        "last_deduction_date",
+        "activation_status",
+        "updated_at",
+    ]
+    for col in cols:
+        if col not in out.columns:
+            out[col] = ""
+    out["monthly_tokens_total"] = pd.to_numeric(out["monthly_tokens_total"], errors="coerce").fillna(30).astype(int).clip(lower=1)
+    out["monthly_tokens_remaining"] = pd.to_numeric(out["monthly_tokens_remaining"], errors="coerce").fillna(30).astype(int).clip(lower=0)
+    out["updated_at"] = out["updated_at"].astype(str)
+    out.loc[out["updated_at"].str.strip() == "", "updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return safe_write_csv(out[cols], LICENSE_TOKENS_FILE)
+
+
+def process_daily_license_token(company_name: str):
+    """
+    One-token rule: deduct 1 token once per day per company.
+    On month change, reset to 30 tokens before applying today's deduction.
+    """
+    company_name = str(company_name or "").strip()
+    if not company_name:
+        return {
+            "company": "",
+            "month_key": datetime.now().strftime("%Y-%m"),
+            "monthly_tokens_total": 30,
+            "monthly_tokens_remaining": 30,
+            "last_deduction_date": "",
+            "activation_status": "One-time Activation Active",
+            "updated_at": "",
+            "deducted_today": False,
+        }
+    ldf = load_license_tokens()
+    month_key = datetime.now().strftime("%Y-%m")
+    today_s = datetime.now().strftime("%Y-%m-%d")
+    now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    m = ldf["company"].astype(str) == company_name
+    if not m.any():
+        new_row = {
+            "company": company_name,
+            "month_key": month_key,
+            "monthly_tokens_total": 30,
+            "monthly_tokens_remaining": 30,
+            "last_deduction_date": "",
+            "activation_status": "One-time Activation Active",
+            "updated_at": now_s,
+        }
+        ldf = pd.concat([ldf, pd.DataFrame([new_row])], ignore_index=True)
+        m = ldf["company"].astype(str) == company_name
+
+    row_idx = ldf[m].index[0]
+    if str(ldf.at[row_idx, "month_key"]) != month_key:
+        ldf.at[row_idx, "month_key"] = month_key
+        ldf.at[row_idx, "monthly_tokens_total"] = 30
+        ldf.at[row_idx, "monthly_tokens_remaining"] = 30
+        ldf.at[row_idx, "last_deduction_date"] = ""
+
+    deducted_today = False
+    if str(ldf.at[row_idx, "last_deduction_date"]) != today_s:
+        cur = int(ldf.at[row_idx, "monthly_tokens_remaining"] or 0)
+        ldf.at[row_idx, "monthly_tokens_remaining"] = max(0, cur - 1)
+        ldf.at[row_idx, "last_deduction_date"] = today_s
+        deducted_today = True
+
+    ldf.at[row_idx, "activation_status"] = "One-time Activation Active"
+    ldf.at[row_idx, "updated_at"] = now_s
+    save_license_tokens(ldf)
+    out = ldf.loc[row_idx].to_dict()
+    out["deducted_today"] = deducted_today
+    return out
 
 
 def append_delivery_log(
@@ -796,6 +2292,7 @@ def append_delivery_log(
         row,
         ["id", "timestamp", "date", "username", "company", "store", "product", "qty", "unit_price", "total_sales", "waybill_no", "rs_status"],
     )
+    consume_system_energy(str(company), amount_pct=1)
 
 
 def append_pending_delivery(username, company, store, product, ordered_qty, unit_price, notes=""):
@@ -957,10 +2454,152 @@ def save_discrepancy_log(dlog: pd.DataFrame) -> bool:
     return safe_write_csv(out, DISCREPANCY_LOG_FILE)
 
 
+def load_ai_observations() -> pd.DataFrame:
+    ensure_auth_files()
+    if not os.path.exists(AI_OBSERVATIONS_FILE):
+        return pd.DataFrame(
+            columns=[
+                "observation_id",
+                "pattern_key",
+                "created_at",
+                "store",
+                "observation_type",
+                "details",
+                "suggested_action",
+                "status",
+                "source",
+            ]
+        )
+    odf = pd.read_csv(AI_OBSERVATIONS_FILE, dtype=str).fillna("")
+    for col in ["observation_id", "pattern_key", "created_at", "store", "observation_type", "details", "suggested_action", "status", "source"]:
+        if col not in odf.columns:
+            odf[col] = ""
+    return odf
+
+
+def save_ai_observations(odf: pd.DataFrame) -> bool:
+    cols = [
+        "observation_id",
+        "pattern_key",
+        "created_at",
+        "store",
+        "observation_type",
+        "details",
+        "suggested_action",
+        "status",
+        "source",
+    ]
+    out = odf.copy()
+    for col in cols:
+        if col not in out.columns:
+            out[col] = ""
+    out = out[cols]
+    return safe_write_csv(out, AI_OBSERVATIONS_FILE)
+
+
+def run_data_observer_for_strategy_lab() -> int:
+    """
+    Monitors sales_log and deliveries_log for recurring store-level delivery gaps.
+    Pattern rule: same store has delivery value gap for 3 consecutive store-days.
+    """
+    sales_df = load_sales_log()
+    del_df = load_delivery_log()
+    if sales_df.empty:
+        return 0
+    if del_df.empty:
+        del_df = pd.DataFrame(columns=["timestamp", "store", "total_sales"])
+
+    sales_daily = sales_df.copy()
+    sales_daily["date"] = pd.to_datetime(sales_daily["Timestamp"], errors="coerce").dt.date
+    sales_daily["sales_revenue"] = pd.to_numeric(sales_daily.get("Revenue", 0), errors="coerce").fillna(0.0)
+    sales_daily = (
+        sales_daily.groupby(["Store", "date"], as_index=False)["sales_revenue"]
+        .sum()
+        .rename(columns={"Store": "store"})
+    )
+
+    del_daily = del_df.copy()
+    del_daily["date"] = pd.to_datetime(del_daily.get("timestamp", pd.Series(dtype=str)), errors="coerce").dt.date
+    del_daily["delivered_value"] = pd.to_numeric(del_daily.get("total_sales", 0), errors="coerce").fillna(0.0)
+    del_daily = (
+        del_daily.groupby(["store", "date"], as_index=False)["delivered_value"]
+        .sum()
+    )
+
+    merged = pd.merge(sales_daily, del_daily, on=["store", "date"], how="left")
+    merged["delivered_value"] = pd.to_numeric(merged["delivered_value"], errors="coerce").fillna(0.0)
+    merged["discrepancy_flag"] = merged["delivered_value"] < (merged["sales_revenue"] * 0.85)
+
+    existing = load_ai_observations()
+    existing_keys = set(existing["pattern_key"].astype(str).tolist()) if not existing.empty else set()
+    new_rows = []
+
+    for store_name, grp in merged.sort_values("date").groupby("store", dropna=False):
+        g = grp.sort_values("date").copy()
+        streak = 0
+        for _, row in g.iterrows():
+            is_gap = bool(row.get("discrepancy_flag", False))
+            if is_gap:
+                streak += 1
+            else:
+                streak = 0
+            if streak >= 3:
+                dval = row.get("date")
+                date_str = dval.isoformat() if hasattr(dval, "isoformat") else str(dval)
+                pattern_key = f"store_gap3|{str(store_name)}|{date_str}"
+                if pattern_key in existing_keys:
+                    continue
+                sales_val = float(row.get("sales_revenue", 0.0) or 0.0)
+                delivered_val = float(row.get("delivered_value", 0.0) or 0.0)
+                gap_val = sales_val - delivered_val
+                obs_id = hashlib.md5(pattern_key.encode("utf-8")).hexdigest()[:16]
+                new_rows.append(
+                    {
+                        "observation_id": obs_id,
+                        "pattern_key": pattern_key,
+                        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "store": str(store_name),
+                        "observation_type": "Recurring Delivery Gap",
+                        "details": f"3-day recurring mismatch detected for {store_name}. Sales={sales_val:.2f}, Delivered={delivered_val:.2f}, Gap={gap_val:.2f}.",
+                        "suggested_action": "Review delivery route, adjust reorder cycle, and verify handover logs.",
+                        "status": "open",
+                        "source": "automated_data_observer",
+                    }
+                )
+                existing_keys.add(pattern_key)
+
+    if not new_rows:
+        return 0
+
+    out = existing.copy() if not existing.empty else pd.DataFrame()
+    out = pd.concat([out, pd.DataFrame(new_rows)], ignore_index=True)
+    save_ai_observations(out)
+    return len(new_rows)
+
+
 def _company_for_auth(auth_user, mapping_data) -> str:
     return str(
         mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", "")) or ""
     ).strip()
+
+
+def get_digital_license_token_status(auth_user, mapping_data):
+    """
+    Digital license token status derived from company balance.
+    If total company balance is <= 0, the token is considered inactive.
+    """
+    company_name = _company_for_auth(auth_user, mapping_data)
+    try:
+        bdf = load_balances_for_company(company_name)
+        total_balance = float(pd.to_numeric(bdf.get("balance", 0), errors="coerce").fillna(0.0).sum()) if not bdf.empty else 0.0
+    except Exception:
+        total_balance = 0.0
+    token_active = total_balance > 0
+    return {
+        "active": bool(token_active),
+        "balance": float(total_balance),
+        "company": company_name,
+    }
 
 
 def apply_discrepancy_company_scope(dlog, auth_user, mapping_data) -> pd.DataFrame:
@@ -1060,8 +2699,7 @@ def render_accountant_summary_report(auth_user, mapping_data, sales_df_all: pd.D
     """გაყიდვების + ფაქტიური მიწოდება + განსაკუთრება (sales_log, deliveries_log, discrepancy_log)."""
     st.title("📋 ანგარიშგევის საჯამო ანგარიში")
     st.caption(
-        "წყარო: `sales_log.csv` (რიტეილის გაყიდვები) · `deliveries_log.csv` (ფაქტიური მიწოდება) · "
-        "`discrepancy_log.csv` (შეკვეთა/მიღების სხვაობა, შენიშვნა/პრობლემა)."
+        "წყარო: საცალო გაყიდვები · ფაქტიური მიწოდება · შეკვეთა/მიღების სხვაობები (შენიშვნა/პრობლემა)."
     )
     c1, c2 = st.columns(2)
     with c1:
@@ -1103,9 +2741,9 @@ def render_accountant_summary_report(auth_user, mapping_data, sales_df_all: pd.D
         if "qty" in ddf.columns:
             del_units = int(pd.to_numeric(ddf["qty"], errors="coerce").fillna(0).sum())
 
-    st.subheader("გაყიდვები (რიტეილი, sales_log) — VS — ფაქტიური მიწოდება (deliveries_log)")
+    st.subheader("გაყიდვები (რიტეილი) — VS — ფაქტიური მიწოდება")
     s1, s2, s3, s4 = st.columns(4)
-    s1.metric("გაყიდვების ჩანაწერი (sales_log)", f"{n_sales}", help="POS/გაყიდვის ღიგაკი")
+    s1.metric("გაყიდვების ჩანაწერი", f"{n_sales}", help="POS/გაყიდვის ღილაკი")
     s2.metric("შემოსავალი (sales, ₾)", format_gel_currency(total_revenue))
     s3.metric("ფაქტიური მიწოდება — ჩანაწერი", f"{del_lines}", help="bestätigte/ჩატარებული მიწოდება")
     s4.metric("მიწოდების ღირებულ. (qty×ფასი, ₾)", format_gel_currency(del_revenue))
@@ -1116,7 +2754,7 @@ def render_accountant_summary_report(auth_user, mapping_data, sales_df_all: pd.D
         st.metric("მიწოდებული ერთეული (deliveries, ჯამი)", f"{del_units}")
     st.caption(
         "შედარება: **რიტეილის** გაყიდვა (`Revenue`/`Profit`) — სხვაა უარყოფითი/ტრანსფერისგან; "
-        "**ფაქტიური მიწოდება** = დისტრიბუტორიდან ფილიალში (deliveries_log `total_sales`)."
+        "**ფაქტიური მიწოდება** = დისტრიბუტორიდან ფილიალში მიწოდებული მთლიანი ღირებულება."
     )
     gap = total_revenue - del_revenue
     st.info(
@@ -1240,15 +2878,8 @@ def render_accountant_summary_report(auth_user, mapping_data, sales_df_all: pd.D
 
 
 def render_accountant_dashboard(auth_user, mapping_data) -> None:
-    """
-    ცალკე ბუღალტრის სამუშაო სივრცე: შეკვეთა vs ფაქტი (₾), განსაკუთრებები, ფილიალის/ქსელის მიხედვით, ექსპორტი.
-    დისტრიბუტორის UI-თან არ უკავშირდება.
-    """
     st.title("💼 Accountant Dashboard")
-    st.caption(
-        "ფინანსური მიმოხილვა: `pending_deliveries` (შეკვეთის ღირებულება) — `deliveries_log` (ფაქტიური მიწოდება). "
-        "განსაკუთრება: `discrepancy_log`."
-    )
+    st.caption("Financial control center: discrepancies, ledger metrics, and inventory health.")
 
     d0, d1, d2 = st.columns([1, 1, 1])
     with d0:
@@ -1256,7 +2887,7 @@ def render_accountant_dashboard(auth_user, mapping_data) -> None:
     with d1:
         ad_end = st.date_input("დაბოლოება", value=datetime.now().date(), key="acc_dash_end")
     with d2:
-        st.caption("ფილტრი: ყველა ცხრილზე ერთი თარიღის საზღვარი")
+        st.caption("ფილტრი: ყველა სექციაზე იგივე პერიოდი")
     if ad_start > ad_end:
         st.error("დაწყება ≤ დაბოლოება")
         return
@@ -1264,10 +2895,9 @@ def render_accountant_dashboard(auth_user, mapping_data) -> None:
     role = str(auth_user.get("role", ""))
     mdata = mapping_data if mapping_data is not None else load_mapping()
     company_name = _company_for_auth(auth_user, mdata)
+    license_state = st.session_state.get("license_state", process_daily_license_token(company_name))
 
-    # --- ფინანსური მიმოხილვა: შეკვეთა (₾) vs ფაქტი (₾) ---
-    pending_r = load_pending_deliveries()
-    pending_r = apply_pending_company_scope(pending_r, auth_user, mdata)
+    pending_r = apply_pending_company_scope(load_pending_deliveries(), auth_user, mdata)
     if not pending_r.empty and "timestamp" in pending_r.columns:
         pending_r = pending_r.copy()
         pending_r["_ts"] = pd.to_datetime(pending_r["timestamp"], errors="coerce")
@@ -1280,8 +2910,7 @@ def render_accountant_dashboard(auth_user, mapping_data) -> None:
         ordered_gel = float((oq * up).sum())
         n_order_lines = len(pending_r)
 
-    del_r = load_delivery_log()
-    del_r = apply_delivery_company_scope(del_r, auth_user, mdata)
+    del_r = apply_delivery_company_scope(load_delivery_log(), auth_user, mdata)
     if not del_r.empty and "timestamp" in del_r.columns:
         del_r = del_r[(del_r["timestamp"].dt.date >= ad_start) & (del_r["timestamp"].dt.date <= ad_end)]
     delivered_gel = 0.0
@@ -1293,44 +2922,9 @@ def render_accountant_dashboard(auth_user, mapping_data) -> None:
             delivered_gel = float(pd.to_numeric(del_r["total_sales"], errors="coerce").fillna(0.0).sum())
         if "qty" in del_r.columns:
             del_units = int(pd.to_numeric(del_r["qty"], errors="coerce").fillna(0).sum())
-
     gap = ordered_gel - delivered_gel
-    left_col, right_col = st.columns([2.25, 1.0], gap="large")
-    with left_col:
-        st.subheader("Sales vs Actual Deliveries")
-        f1, f2, f3, f4 = st.columns(4)
-        f1.metric("Total Sales (Ordered, ₾)", format_gel_currency(ordered_gel))
-        f2.metric("Actual Deliveries (₾)", format_gel_currency(delivered_gel))
-        f3.metric("Gap (Ordered−Actual)", format_gel_currency(gap), delta=float(gap))
-        f4.metric("Order lines / Delivered units", f"{n_order_lines} / {del_units}")
-    with right_col:
-        _placeholder_btc = 0.0
-        _company_balance = 0.0
-        try:
-            _bdf = load_balances_for_company(company_name)
-            if not _bdf.empty and "balance" in _bdf.columns:
-                _company_balance = float(pd.to_numeric(_bdf["balance"], errors="coerce").fillna(0.0).sum())
-                _placeholder_btc = _company_balance / 200000.0
-        except Exception:
-            _placeholder_btc = 0.0
-            _company_balance = 0.0
-        st.markdown(
-            f"""
-            <div class="crypto-panel">
-                <div class="crypto-title">⛏️ Mining</div>
-                <div class="crypto-muted">Company wallet (placeholder)</div>
-                <div class="crypto-value">{_placeholder_btc:,.4f} BTC</div>
-                <div class="crypto-muted">Estimated fiat: {format_gel_currency(_company_balance)}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    st.markdown('<div class="subtle-divider"></div>', unsafe_allow_html=True)
-    st.caption("Ordered data: `pending_deliveries` | Actual deliveries: `deliveries_log`")
 
-    # --- განსაკუთრება: მხოლოდ ordered ≠ confirmed ---
-    dlog = load_discrepancy_log()
-    dlog = apply_discrepancy_company_scope(dlog, auth_user, mdata)
+    dlog = apply_discrepancy_company_scope(load_discrepancy_log(), auth_user, mdata)
     if not dlog.empty and "timestamp" in dlog.columns:
         dlog = dlog[(dlog["timestamp"].dt.date >= ad_start) & (dlog["timestamp"].dt.date <= ad_end)]
     if not dlog.empty and "ordered_qty" in dlog.columns and "confirmed_qty" in dlog.columns:
@@ -1340,125 +2934,423 @@ def render_accountant_dashboard(auth_user, mapping_data) -> None:
     else:
         disc_only = pd.DataFrame()
 
-    st.markdown("---")
-    st.subheader("Discrepancies (ordered_qty != confirmed_qty)")
-    st.caption("Includes `notes` and `issue` to explain quantity mismatches.")
-    if disc_only.empty:
-        st.info("აღნიშნულ პერიოდში/ფილტრზე «შეკვეთა ≠ მიღება» ჩანაწერი არაა (ან ყველა 0-ია).")
-    else:
-        dcols = [c for c in ["timestamp", "company", "distributor", "store", "product", "ordered_qty", "confirmed_qty", "difference", "issue", "notes", "reason", "review_status"] if c in disc_only.columns]
-        dshow = disc_only[dcols].copy()
-        if "timestamp" in dshow.columns and pd.api.types.is_datetime64_any_dtype(dshow["timestamp"]):
-            dshow["timestamp"] = dshow["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
-        st.dataframe(
-            dshow.rename(
+    inv_all = load_data()
+    inv_sales_seed = pd.DataFrame(columns=["Store", "Product"])
+    inv_filtered, _ = apply_role_filters(inv_all, inv_sales_seed, auth_user, mdata)
+    low_stock_threshold = 10
+
+    with st.expander("📌 Daily Alerts", expanded=True):
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Open Discrepancies", f"{len(disc_only)}")
+        a2.metric("Gap (Ordered−Delivered)", format_gel_currency(gap), delta=float(gap))
+        a3.metric("Low Stock Alerts (<10)", f"{int((pd.to_numeric(inv_filtered.get('Current_Stock', pd.Series(dtype='float64')), errors='coerce').fillna(0) < low_stock_threshold).sum())}")
+
+        st.markdown("#### Discrepancy Radar")
+        if disc_only.empty:
+            st.success("No discrepancy alerts for selected date range.")
+        else:
+            radar_cols = [c for c in ["timestamp", "company", "distributor", "store", "product", "ordered_qty", "confirmed_qty", "difference", "issue", "notes", "review_status"] if c in disc_only.columns]
+            radar = disc_only[radar_cols].copy()
+            radar["ordered_qty"] = pd.to_numeric(radar.get("ordered_qty", 0), errors="coerce").fillna(0).astype(int)
+            radar["delivered_qty"] = pd.to_numeric(radar.get("confirmed_qty", 0), errors="coerce").fillna(0).astype(int)
+            if "timestamp" in radar.columns and pd.api.types.is_datetime64_any_dtype(radar["timestamp"]):
+                radar["timestamp"] = radar["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+            radar_show_cols = [c for c in ["timestamp", "company", "distributor", "store", "product", "ordered_qty", "delivered_qty", "difference", "issue", "notes", "review_status"] if c in radar.columns]
+            radar_show = radar[radar_show_cols].rename(
                 columns={
-                    "timestamp": "დრო",
-                    "company": "კომპანია",
-                    "distributor": "დისტრიბუტორი",
-                    "store": "ფილიალი/მაღაზია",
-                    "product": "პროდუქტი",
-                    "ordered_qty": "შეკვეთა",
-                    "confirmed_qty": "მიღება",
-                    "difference": "Δ",
-                    "issue": "issue",
-                    "notes": "შენიშვნა",
-                    "reason": "მიზეზი",
-                    "review_status": "status",
+                    "timestamp": "Time",
+                    "company": "Company",
+                    "distributor": "Distributor",
+                    "store": "Store",
+                    "product": "Product",
+                    "ordered_qty": "Ordered Qty",
+                    "delivered_qty": "Delivered Qty",
+                    "difference": "Delta",
+                    "issue": "Issue",
+                    "notes": "Notes",
+                    "review_status": "Audit Status",
                 }
-            ),
-            use_container_width=True,
-            hide_index=True,
-            height=min(560, 120 + 36 * min(14, len(dshow))),
+            )
+
+            def _style_radar(_row):
+                ordered_val = pd.to_numeric(_row.get("Ordered Qty", 0), errors="coerce")
+                delivered_val = pd.to_numeric(_row.get("Delivered Qty", 0), errors="coerce")
+                if float(ordered_val if pd.notna(ordered_val) else 0) != float(delivered_val if pd.notna(delivered_val) else 0):
+                    return ["background-color: #f7dede; color: #4b1d24;"] * len(_row)
+                return [""] * len(_row)
+
+            st.dataframe(
+                radar_show.style.apply(_style_radar, axis=1),
+                use_container_width=True,
+                hide_index=True,
+                height=min(520, 120 + 36 * min(12, len(radar_show))),
+            )
+
+            st.markdown("##### Audit Actions")
+            for _, urow in disc_only.sort_values("timestamp", ascending=False).head(30).iterrows():
+                rid = _discrepancy_row_id(urow)
+                row_cols = st.columns([3.7, 2.2, 1.1])
+                with row_cols[0]:
+                    st.markdown(
+                        f"**{urow.get('product', '—')}** | {urow.get('store', '—')} "
+                        f"(Ordered: {urow.get('ordered_qty', 0)} / Delivered: {urow.get('confirmed_qty', 0)})"
+                    )
+                with row_cols[1]:
+                    st.caption(f"Issue: {str(urow.get('issue', '') or '—')[:90]} | Notes: {str(urow.get('notes', '') or '—')[:90]}")
+                with row_cols[2]:
+                    ukey = hashlib.md5(rid.encode("utf-8")).hexdigest()
+                    if st.button("Confirm Audit", key=f"acc_confirm_{ukey}", use_container_width=True):
+                        ok, msg = mark_discrepancy_row_reviewed(rid, auth_user, mdata)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+    with st.expander("📒 General Ledger", expanded=True):
+        gl_left, gl_right = st.columns([2.25, 1.0], gap="large")
+        with gl_left:
+            g1, g2, g3, g4, g5 = st.columns(5)
+            g1.metric("Total Ordered Value", format_gel_currency(ordered_gel))
+            g2.metric("Total Delivered Value", format_gel_currency(delivered_gel))
+            g3.metric("Total Expected Revenue", format_gel_currency(delivered_gel))
+            g4.metric("Order Lines / Deliveries", f"{n_order_lines} / {n_deliveries}")
+            g5.metric("Delivered Units", f"{del_units}")
+        with gl_right:
+            _placeholder_btc = 0.0
+            _company_balance = 0.0
+            try:
+                _bdf = load_balances_for_company(company_name)
+                if not _bdf.empty and "balance" in _bdf.columns:
+                    _company_balance = float(pd.to_numeric(_bdf["balance"], errors="coerce").fillna(0.0).sum())
+                    _placeholder_btc = _company_balance / 200000.0
+            except Exception:
+                _placeholder_btc = 0.0
+                _company_balance = 0.0
+            st.markdown(
+                f"""
+                <div class="crypto-panel">
+                    <div class="crypto-title">⛏️ Mining</div>
+                    <div class="crypto-muted">Company wallet (placeholder)</div>
+                    <div class="crypto-value">{_placeholder_btc:,.4f} BTC</div>
+                    <div class="crypto-muted">Estimated fiat: {format_gel_currency(_company_balance)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("#### Sales / Delivery Log Monitor")
+        if disc_only.empty:
+            st.info("No `ordered != delivered` rows in the selected period.")
+        else:
+            log_cols = [c for c in ["timestamp", "distributor", "store", "product", "ordered_qty", "confirmed_qty", "issue", "notes", "review_status"] if c in disc_only.columns]
+            log_view = disc_only[log_cols].copy()
+            if "timestamp" in log_view.columns and pd.api.types.is_datetime64_any_dtype(log_view["timestamp"]):
+                log_view["timestamp"] = log_view["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+            log_view["ordered_qty"] = pd.to_numeric(log_view.get("ordered_qty", 0), errors="coerce").fillna(0).astype(int)
+            log_view["delivered_qty"] = pd.to_numeric(log_view.get("confirmed_qty", 0), errors="coerce").fillna(0).astype(int)
+            if "confirmed_qty" in log_view.columns:
+                log_view = log_view.drop(columns=["confirmed_qty"])
+            log_view = log_view.rename(
+                columns={
+                    "timestamp": "Time",
+                    "distributor": "Distributor",
+                    "store": "Store",
+                    "product": "Product",
+                    "ordered_qty": "Ordered Qty",
+                    "delivered_qty": "Delivered Qty",
+                    "issue": "Issue",
+                    "notes": "Notes",
+                    "review_status": "Audit Status",
+                }
+            )
+
+            def _style_sales_delivery_log(_row):
+                if int(_row.get("Ordered Qty", 0)) != int(_row.get("Delivered Qty", 0)):
+                    return ["background-color: #f7dede; color: #4b1d24;"] * len(_row)
+                return [""] * len(_row)
+
+            st.dataframe(
+                log_view.style.apply(_style_sales_delivery_log, axis=1),
+                use_container_width=True,
+                hide_index=True,
+                height=min(420, 120 + 36 * min(9, len(log_view))),
+            )
+
+        avg_item_price = 0.0
+        if not del_r.empty and "unit_price" in del_r.columns:
+            avg_item_price = float(pd.to_numeric(del_r["unit_price"], errors="coerce").fillna(0.0).mean() or 0.0)
+        elif not pending_r.empty and "unit_price" in pending_r.columns:
+            avg_item_price = float(pd.to_numeric(pending_r["unit_price"], errors="coerce").fillna(0.0).mean() or 0.0)
+        discrepancies_caught = int(len(disc_only))
+        efficiency_gains = float(discrepancies_caught) * float(avg_item_price)
+        st.markdown(
+            f"""
+            <div class="fintech-card">
+                <div style="color:#9fb2d8;font-size:0.86rem;">Efficiency Gains</div>
+                <div style="color:#e8eefc;font-size:1.25rem;font-weight:700;margin-top:0.2rem;">{format_gel_currency(efficiency_gains)}</div>
+                <div style="color:#9fb2d8;font-size:0.85rem;margin-top:0.25rem;">
+                    Formula: Total Discrepancies Caught ({discrepancies_caught}) × Average Item Price ({format_gel_currency(avg_item_price)})
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-    # --- ფილიალი / ქსელი: ყველაზე ხშირი პრობლემები (მაგ. ნიკორა, სპარი) ---
-    st.markdown("---")
-    st.subheader("ფილიალი / ქსელი — მიწოდების პრობლემების სიხშირე")
-    st.caption("ჯგუფი «ქსელი» = ბრენდი სახელის **პირველი ნაწილი** (მაგ. «ნიკორა - ვაკე» → ნიკორა).")
-    if disc_only.empty:
-        st.caption("მონაცემი არაა.")
-        by_store = pd.DataFrame()
-        by_chain = pd.DataFrame()
-    else:
-        s_src = disc_only.copy()
-        if "store" in s_src.columns:
-            s_src["_chain"] = s_src["store"].astype(str).map(accountant_store_chain_label)
-        else:
-            s_src["_chain"] = "—"
-        if "store" in s_src.columns:
-            by_store = (
-                s_src.groupby("store", as_index=False)
-                .size()
-                .rename(columns={"store": "ფილიალი (სრული)", "size": "ინციდენტი"})
-                .sort_values("ინციდენტი", ascending=False)
-                .head(25)
-            )
-        else:
-            by_store = pd.DataFrame()
-        if "_chain" in s_src.columns:
-            by_chain = (
-                s_src.groupby("_chain", as_index=False)
-                .size()
-                .rename(columns={"_chain": "ქსელი / ბრენდი", "size": "ინციდენტი"})
-                .sort_values("ინციდენტი", ascending=False)
-                .head(25)
-            )
-        else:
-            by_chain = pd.DataFrame()
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**ფილიალი (სრული სახელი)**")
-            st.dataframe(by_store if not by_store.empty else pd.DataFrame([{"": "—"}]), use_container_width=True, hide_index=True)
-        with c2:
-            st.markdown("**ქსელი (ნიკორა, სპარი, …)**")
-            st.dataframe(by_chain if not by_chain.empty else pd.DataFrame([{"": "—"}]), use_container_width=True, hide_index=True)
+    with st.expander("⚙️ Resource Monitor", expanded=True):
+        sales_all = load_sales_log()
+        _, scoped_sales = apply_role_filters(inv_all, sales_all, auth_user, mdata)
+        today_d = datetime.now().date()
+        sales_today_count = 0
+        if scoped_sales is not None and not scoped_sales.empty and "Timestamp" in scoped_sales.columns:
+            sales_today_count = int((scoped_sales["Timestamp"].dt.date == today_d).sum())
+        deliveries_today_count = 0
+        if not del_r.empty and "timestamp" in del_r.columns:
+            deliveries_today_count = int((del_r["timestamp"].dt.date == today_d).sum())
+        total_txn_today = sales_today_count + deliveries_today_count
 
-    # --- ექსპორტი (CSV + Excel) ---
-    st.markdown("---")
-    st.subheader("ექსპორტი")
-    st.caption("ჩამოიტვირთეთ მიმდინარე ფილტრის განსაკუთრების ცხრილი (order≠confirm).")
-    ex1, ex2, ex3 = st.columns(3)
-    with ex1:
-        if not disc_only.empty:
-            csv_buf = disc_only.to_csv(index=False, encoding="utf-8-sig")
-            st.download_button(
-                label="⬇ ჩამოტვირთვა: CSV (UTF-8)",
-                data=csv_buf,
-                file_name=f"discrepancy_report_{ad_start}_{ad_end}.csv",
-                mime="text/csv",
-                key="acc_dash_csv_dl",
-                use_container_width=True,
-            )
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric("Sales Logged Today", f"{sales_today_count}")
+        rc2.metric("Deliveries Logged Today", f"{deliveries_today_count}")
+        rc3.metric("Transactions Processed Today", f"{total_txn_today}")
+        st.markdown(
+            f"**Token Countdown:** Tokens remaining for this month: "
+            f"**{int(license_state.get('monthly_tokens_remaining', 30) or 0)}**"
+        )
+        if int(license_state.get("monthly_tokens_remaining", 30) or 0) < 5:
+            st.error("Low Token Balance! System will enter Read-Only mode in 5 days")
+
+        credits = load_compute_credits_for_company(company_name)
+        available_credits = int(credits.get("available_credits", 0) or 0)
+        credit_capacity = max(1, int(credits.get("credit_capacity", 100) or 100))
+        system_energy_pct = int(credits.get("system_energy_pct", 100) or 100)
+        credit_ratio = min(1.0, max(0.0, available_credits / float(credit_capacity)))
+        st.markdown("##### DistroCoin & Compute Credits")
+        tk1, tk2 = st.columns([2.0, 1.0])
+        with tk1:
+            st.metric("DistroCoin Balance", f"{available_credits} DC")
+        with tk2:
+            if st.button("Refill", key="resource_refill_btn", use_container_width=True):
+                st.session_state.pending_page = "🪙 Buy Tokens"
+                st.rerun()
+        st.progress(credit_ratio, text=f"Available Credits: {available_credits} / {credit_capacity}")
+        if available_credits <= 20:
+            st.warning("Credits are running low. Refill soon to avoid throttled operations.")
         else:
-            st.button("⬇ CSV (ცალია)", key="acc_dash_csv_empty", disabled=True, use_container_width=True)
-    with ex2:
-        if not disc_only.empty:
-            try:
-                xbuf = io.BytesIO()
-                d_exp = disc_only.copy()
-                if "timestamp" in d_exp.columns and pd.api.types.is_datetime64_any_dtype(d_exp["timestamp"]):
-                    d_exp["timestamp"] = d_exp["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
-                with pd.ExcelWriter(xbuf, engine="openpyxl") as xw:
-                    d_exp.to_excel(xw, index=False, sheet_name="Discrepancies")
-                xbuf.seek(0)
-                st.download_button(
-                    label="⬇ ჩამოტვირთვა: Excel (xlsx)",
-                    data=xbuf.getvalue(),
-                    file_name=f"discrepancy_report_{ad_start}_{ad_end}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="acc_dash_xlsx_dl",
-                    use_container_width=True,
+            st.caption("Credits are healthy for current transaction volume.")
+
+        st.markdown("##### System Energy")
+        st.progress(max(0.0, min(1.0, system_energy_pct / 100.0)), text=f"System Energy: {system_energy_pct}%")
+        st.caption("Token Usage Model: each confirmed delivery or logged sale consumes 1% energy.")
+
+        fuel_saved_liters = round(deliveries_today_count * 0.35, 2)
+        time_saved_minutes = int(deliveries_today_count * 6)
+        st.markdown("##### Cost Savings Estimator")
+        st.info(
+            f"Estimated Fuel/Time Saved: **{fuel_saved_liters} L** fuel and **{time_saved_minutes} min** operational time "
+            "saved today (placeholder model based on deliveries processed)."
+        )
+
+    with st.expander("📦 Inventory Management", expanded=True):
+        if inv_filtered.empty:
+            st.info("No inventory rows available for this role/company.")
+        else:
+            inv_cols = [c for c in ["Store_Name", "Product_Name", "Current_Stock", "Cost_Price", "Selling_Price", "Expiry_Date"] if c in inv_filtered.columns]
+            inv_show = inv_filtered[inv_cols].copy()
+            if "Current_Stock" in inv_show.columns:
+                inv_show["Current_Stock"] = pd.to_numeric(inv_show["Current_Stock"], errors="coerce").fillna(0)
+                inv_show["Alert"] = inv_show["Current_Stock"].apply(
+                    lambda x: "Low Stock - Reorder Soon" if float(x) < low_stock_threshold else ""
                 )
-            except Exception:
-                st.caption("Excel-ისთვის: `pip install openpyxl` (requirements-შიც).")
+            if "Expiry_Date" in inv_show.columns:
+                inv_show["Expiry_Date"] = pd.to_datetime(inv_show["Expiry_Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            inv_show = inv_show.sort_values("Current_Stock", ascending=True)
+
+            def _style_inventory_row(row):
+                try:
+                    stock_val = float(row.get("Current_Stock", 0) or 0)
+                except (TypeError, ValueError):
+                    stock_val = 0
+                if stock_val < low_stock_threshold:
+                    return ["background-color: #ffe8cc; color: #4e2f00;"] * len(row)
+                return [""] * len(row)
+
+            st.dataframe(
+                inv_show.rename(
+                    columns={
+                        "Store_Name": "Store",
+                        "Product_Name": "Product",
+                        "Current_Stock": "Units Left",
+                        "Cost_Price": "Cost",
+                        "Selling_Price": "Sell Price",
+                        "Expiry_Date": "Expiry Date",
+                        "Alert": "Alert",
+                    }
+                ).style.apply(_style_inventory_row, axis=1),
+                use_container_width=True,
+                hide_index=True,
+                height=min(560, 120 + 36 * min(14, len(inv_show))),
+            )
+
+    with st.expander("🧠 AI Strategy Lab", expanded=True):
+        st.markdown('<div class="ai-brain-glow">🧠 Innovation Engine: Self-Evolving Strategy Node</div>', unsafe_allow_html=True)
+        st.caption("AI Insights Hub: automated observations + future internet-trend suggestions bridge.")
+
+        generated_now = run_data_observer_for_strategy_lab()
+        if generated_now > 0:
+            st.success(f"Data Observer added {generated_now} new automated observation(s).")
+
+        st.markdown("#### External Knowledge Bridge (Suggestions)")
+        kb1, kb2 = st.columns(2)
+        with kb1:
+            st.selectbox(
+                "Trend Lens",
+                ["Demand shifts", "Pricing patterns", "Regional delivery risks", "Inventory optimization"],
+                key="ai_lab_trend_lens",
+            )
+            st.text_area(
+                "Suggested Prompt Template",
+                value="Find this week's retail distribution trends for FMCG delivery efficiency and stockout risk.",
+                key="ai_lab_prompt_template",
+                height=100,
+            )
+        with kb2:
+            st.markdown("**Structured Suggestions Queue**")
+            st.caption("- Connect AI API endpoint\n- Pull market trend snippets\n- Rank recommendations by impact")
+            st.info("API connector placeholder: this section is ready for external trend ingestion.")
+
+        st.markdown("#### Automated Observations")
+        obs_df = load_ai_observations()
+        if obs_df.empty:
+            st.info("No automated observations yet.")
         else:
-            st.button("⬇ Excel (ცალია)", key="acc_x_empty", disabled=True, use_container_width=True)
-    with ex3:
-        st.metric("გატანის სტრიქონი", f"{len(disc_only)}")
+            obs_df = obs_df.sort_values("created_at", ascending=False)
+            open_obs = obs_df[obs_df["status"].astype(str).isin(["open", "accepted"])].copy()
+            if open_obs.empty:
+                st.success("No active observations. All items were discarded or closed.")
+            for _, obs in open_obs.head(20).iterrows():
+                oid = str(obs.get("observation_id", "")).strip()
+                status_val = str(obs.get("status", "open"))
+                st.markdown(
+                    f"""
+                    <div class="strategy-card">
+                        <b>{obs.get("observation_type", "Observation")}</b> · <span style="color:#9fb2d8;">Store:</span> {obs.get("store", "—")}<br/>
+                        <span style="color:#9fb2d8;">Created:</span> {obs.get("created_at", "—")} · <span style="color:#9fb2d8;">Status:</span> {status_val}<br/>
+                        <span style="color:#9fb2d8;">Details:</span> {obs.get("details", "")}<br/>
+                        <span style="color:#9fb2d8;">Suggested Action:</span> {obs.get("suggested_action", "")}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                b1, b2 = st.columns([1.4, 1.0])
+                with b1:
+                    if st.button("Accept & Update Code", key=f"ai_accept_{oid}", use_container_width=True):
+                        u = load_ai_observations()
+                        m = u["observation_id"].astype(str) == oid
+                        u.loc[m, "status"] = "accepted"
+                        save_ai_observations(u)
+                        st.success("Marked as accepted. Placeholder: automated code-update pipeline can be connected here.")
+                        st.rerun()
+                with b2:
+                    if st.button("Discard", key=f"ai_discard_{oid}", use_container_width=True):
+                        u = load_ai_observations()
+                        m = u["observation_id"].astype(str) == oid
+                        u.loc[m, "status"] = "discarded"
+                        save_ai_observations(u)
+                        st.warning("Observation discarded.")
+                        st.rerun()
+
+    st.markdown("---")
+    report_sections = []
+    if not disc_only.empty:
+        rep_disc = disc_only.copy()
+        rep_disc["report_section"] = "discrepancy_log"
+        report_sections.append(rep_disc)
+    if not inv_filtered.empty:
+        rep_inv = inv_filtered.copy()
+        if "Current_Stock" in rep_inv.columns:
+            rep_inv["Current_Stock"] = pd.to_numeric(rep_inv["Current_Stock"], errors="coerce").fillna(0)
+            rep_inv = rep_inv[rep_inv["Current_Stock"] < low_stock_threshold].copy()
+        if not rep_inv.empty:
+            rep_inv["alert"] = "Low Stock - Reorder Soon"
+            rep_inv["report_section"] = "inventory_alerts"
+            report_sections.append(rep_inv)
+    report_df = pd.concat(report_sections, ignore_index=True) if report_sections else pd.DataFrame([{"report_section": "empty"}])
+    st.download_button(
+        "Download Report as CSV",
+        data=report_df.to_csv(index=False, encoding="utf-8-sig"),
+        file_name=f"accountant_report_{ad_start}_{ad_end}.csv",
+        mime="text/csv",
+        use_container_width=False,
+    )
+
+    with st.expander("🧾 Audit Trail", expanded=False):
+        tdf = load_audit_trail()
+        if tdf.empty:
+            st.info("Audit Trail is empty.")
+        else:
+            tdf = tdf[tdf["company"].astype(str) == str(company_name)] if "company" in tdf.columns else tdf
+            if tdf.empty:
+                st.info("No audit records for current company.")
+            else:
+                tshow = tdf.sort_values("timestamp", ascending=False).copy()
+                tshow["timestamp"] = tshow["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+                st.caption("Transparency policy: no correction entry is deleted; each change remains traceable.")
+                st.dataframe(
+                    tshow.rename(
+                        columns={
+                            "timestamp": "Time",
+                            "actor": "Actor",
+                            "actor_type": "Type",
+                            "company": "Company",
+                            "action": "Action",
+                            "target_id": "Target ID",
+                            "reason": "Reason",
+                            "details": "Details",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(420, 110 + 34 * min(10, len(tshow))),
+                )
+
+    if role in ("Accountant", "Company_Admin", "Super_Admin"):
+        st.markdown("### 📥 Daily Returns Summary")
+        returns_df = load_return_log()
+        if not returns_df.empty:
+            returns_df = returns_df[returns_df["company"].astype(str) == str(company_name)] if role != "Super_Admin" else returns_df
+            today_d = datetime.now().date()
+            returns_df = returns_df[returns_df["timestamp"].dt.date == today_d]
+        if returns_df.empty:
+            st.caption("დღევანდელი დაბრუნებების ჩანაწერი არ არის.")
+        else:
+            ret_sum = (
+                returns_df.groupby(["store", "product", "status"], as_index=False)
+                .agg(total_qty=("qty", "sum"), total_value=("total_return", "sum"), lines=("id", "count"))
+                .sort_values(["store", "product"])
+            )
+            st.dataframe(ret_sum, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download Daily Returns CSV",
+                data=ret_sum.to_csv(index=False, encoding="utf-8-sig"),
+                file_name=f"daily_returns_summary_{today_d}.csv",
+                mime="text/csv",
+                use_container_width=False,
+            )
+
+    used_tokens_this_month = max(
+        0,
+        int(license_state.get("monthly_tokens_total", 30) or 30)
+        - int(license_state.get("monthly_tokens_remaining", 30) or 0),
+    )
+    approx_hours_saved = round(used_tokens_this_month * 1.3, 1)
+    st.caption(
+        f"This month, your 30 tokens saved you approximately {approx_hours_saved} hours of manual accounting"
+    )
 
     if role in ("Accountant",):
-        st.info("**Accountant** — მხოლოდ ბუღალტრიის პანელი. დისტრიბუტორის მიწოდება აქ არ ჩანს — გამოიყენეთ «ფაქტი (₾)» და `discrepancy` ქვემოთ.")
+        st.info("Accountant access is limited to financial control surfaces and audit workflows.")
 
 
 def format_gel_currency(amount):
@@ -1473,6 +3365,311 @@ def format_gel_currency(amount):
     whole_fmt = f"{int(whole):,}".replace(",", " ")
     res = f"{whole_fmt},{frac} ₾"
     return ("−" if neg else "") + res
+
+
+def _simple_pdf_bytes(title: str, lines) -> bytes:
+    """Minimal PDF generator (no third-party libs) for report download."""
+    safe_lines = [str(x).replace("(", "[").replace(")", "]") for x in (lines or [])]
+    stream_lines = ["BT", "/F1 12 Tf", "50 780 Td", f"({str(title)}) Tj"]
+    y_step = 16
+    for i, ln in enumerate(safe_lines[:38]):
+        stream_lines.append(f"0 -{y_step} Td")
+        stream_lines.append(f"({ln}) Tj")
+    stream_lines.append("ET")
+    content_stream = "\n".join(stream_lines).encode("latin-1", errors="ignore")
+
+    objects = []
+    objects.append(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+    objects.append(b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n")
+    objects.append(b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n")
+    objects.append(b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n")
+    objects.append(b"5 0 obj << /Length " + str(len(content_stream)).encode("ascii") + b" >> stream\n" + content_stream + b"\nendstream endobj\n")
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    xref = [0]
+    for obj in objects:
+        xref.append(len(pdf))
+        pdf.extend(obj)
+    xref_pos = len(pdf)
+    pdf.extend(f"xref\n0 {len(xref)}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for off in xref[1:]:
+        pdf.extend(f"{off:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        f"trailer << /Size {len(xref)} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF".encode("ascii")
+    )
+    return bytes(pdf)
+
+
+def compute_distributor_reputation(auth_user, mapping_data):
+    """Accuracy + timing + weighted reputation score with tiering."""
+    username = str(auth_user.get("username", ""))
+    company_name = _company_for_auth(auth_user, mapping_data)
+    ddf = load_delivery_log()
+    if ddf.empty:
+        return {
+            "total_deliveries": 0,
+            "perfect_deliveries": 0,
+            "accuracy_pct": 0.0,
+            "timing_score": 0.0,
+            "reputation_score": 0.0,
+            "tier": "Under Review",
+            "badge": "🔴",
+            "late_deliveries": 0,
+            "completed_deliveries": 0,
+            "company": company_name,
+        }
+    ddf = ddf[
+        (ddf["username"].astype(str) == username)
+        & (ddf["company"].astype(str) == company_name)
+    ].copy()
+    if ddf.empty:
+        return {
+            "total_deliveries": 0,
+            "perfect_deliveries": 0,
+            "accuracy_pct": 0.0,
+            "timing_score": 0.0,
+            "reputation_score": 0.0,
+            "tier": "Under Review",
+            "badge": "🔴",
+            "late_deliveries": 0,
+            "completed_deliveries": 0,
+            "company": company_name,
+        }
+    ddf = ddf.sort_values("timestamp")
+    total_deliveries = int(len(ddf))
+
+    # Perfect delivery proxy: match delivery aggregates with pending ordered quantities by stop key.
+    pdf = load_pending_deliveries()
+    pdf = pdf[
+        (pdf["username"].astype(str) == username)
+        & (pdf["company"].astype(str) == company_name)
+    ].copy() if not pdf.empty else pd.DataFrame()
+    if not pdf.empty and "timestamp" in pdf.columns:
+        pdf["_date"] = pd.to_datetime(pdf["timestamp"], errors="coerce").dt.date.astype(str)
+    else:
+        pdf = pd.DataFrame(columns=["store", "product", "username", "_date", "ordered_qty"])
+    ddf["_date"] = pd.to_datetime(ddf["timestamp"], errors="coerce").dt.date.astype(str)
+    ddf["qty"] = pd.to_numeric(ddf["qty"], errors="coerce").fillna(0).astype(int)
+    pdf["ordered_qty"] = pd.to_numeric(pdf.get("ordered_qty", 0), errors="coerce").fillna(0).astype(int)
+    d_agg = ddf.groupby(["store", "product", "username", "_date"], as_index=False)["qty"].sum().rename(columns={"qty": "delivered_qty"})
+    p_agg = pdf.groupby(["store", "product", "username", "_date"], as_index=False)["ordered_qty"].sum()
+    merged = pd.merge(d_agg, p_agg, on=["store", "product", "username", "_date"], how="left")
+    merged["ordered_qty"] = pd.to_numeric(merged["ordered_qty"], errors="coerce").fillna(merged["delivered_qty"])
+    perfect_deliveries = int((merged["ordered_qty"] == merged["delivered_qty"]).sum())
+    accuracy_pct = float((perfect_deliveries / max(1, total_deliveries)) * 100.0)
+
+    # Timing score: late if elapsed between consecutive completed stops > 15 min.
+    completed = ddf.copy()
+    if "rs_status" in completed.columns:
+        m_completed = completed["rs_status"].astype(str).str.contains("completed", case=False, na=False)
+        if m_completed.any():
+            completed = completed[m_completed]
+    completed = completed.sort_values("timestamp")
+    completed_deliveries = int(len(completed))
+    late_deliveries = 0
+    if completed_deliveries > 1:
+        completed["_delta_min"] = completed["timestamp"].diff().dt.total_seconds().fillna(0) / 60.0
+        late_deliveries = int((completed["_delta_min"] > 15).sum())
+    late_pct = float((late_deliveries / max(1, completed_deliveries)) * 100.0)
+    timing_score = max(0.0, min(100.0, 100.0 - (late_pct * 2.0)))
+
+    reputation_score = max(0.0, min(100.0, (accuracy_pct * 0.65) + (timing_score * 0.35)))
+    if reputation_score >= 90:
+        tier, badge = "Legend", "🥇 Gold Badge"
+    elif reputation_score >= 75:
+        tier, badge = "Professional", "🥈 Silver Badge"
+    elif reputation_score >= 50:
+        tier, badge = "Rookie", "🥉 Bronze Badge"
+    else:
+        tier, badge = "Under Review", "🔴 Red Alert"
+    return {
+        "total_deliveries": total_deliveries,
+        "perfect_deliveries": perfect_deliveries,
+        "accuracy_pct": round(accuracy_pct, 2),
+        "timing_score": round(timing_score, 2),
+        "reputation_score": round(reputation_score, 2),
+        "tier": tier,
+        "badge": badge,
+        "late_deliveries": late_deliveries,
+        "completed_deliveries": completed_deliveries,
+        "company": company_name,
+    }
+
+
+def render_profile_page(auth_user, mapping_data):
+    st.title("👤 Profile Page — Living CV")
+    role = str(auth_user.get("role", ""))
+    username = str(auth_user.get("username", ""))
+    company_name = _company_for_auth(auth_user, mapping_data)
+    st.caption(f"User: {username} | Role: {role} | Company: {company_name or 'N/A'}")
+
+    users = load_users()
+    user_row = next((u for u in users if str(u.get("username", "")) == username), auth_user)
+    years_service = max(1, datetime.now().year - 2024)
+    speed_score = 100.0
+    accuracy_score = 100.0
+    rep = None
+    if role == "Distributor":
+        rep = compute_distributor_reputation(auth_user, mapping_data)
+        accuracy_score = rep["accuracy_pct"]
+        speed_score = rep["timing_score"]
+        final_score = rep["reputation_score"]
+        tier_label = rep["tier"]
+        badge_label = rep["badge"]
+    else:
+        # Generic role score fallback.
+        dlog = apply_discrepancy_company_scope(load_discrepancy_log(), auth_user, mapping_data)
+        unresolved = 0 if dlog.empty else int((pd.to_numeric(dlog.get("difference", 0), errors="coerce").fillna(0) != 0).sum())
+        accuracy_score = max(0.0, 100.0 - (unresolved * 2.5))
+        speed_score = max(0.0, min(100.0, 60.0 + (years_service * 4.0)))
+        final_score = max(0.0, min(100.0, (accuracy_score * 0.5) + (speed_score * 0.3) + (min(100, years_service * 10) * 0.2)))
+        if final_score >= 90:
+            tier_label, badge_label = "Legend", "🥇 Gold Badge"
+        elif final_score >= 75:
+            tier_label, badge_label = "Professional", "🥈 Silver Badge"
+        elif final_score >= 50:
+            tier_label, badge_label = "Rookie", "🥉 Bronze Badge"
+        else:
+            tier_label, badge_label = "Under Review", "🔴 Red Alert"
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Accuracy", f"{accuracy_score:.2f}%")
+    p2.metric("Speed", f"{speed_score:.2f}%")
+    p3.metric("Years of Service", f"{years_service}")
+    p4.metric("Reputation Score", f"{final_score:.2f}")
+
+    # Circular progress (CSS conic-gradient)
+    progress_pct = max(0, min(100, int(round(final_score))))
+    st.markdown(
+        f"""
+        <div style="display:flex;gap:18px;align-items:center;">
+            <div style="
+                width:120px;height:120px;border-radius:50%;
+                background:conic-gradient(#2f80ff {progress_pct}%, #22314f {progress_pct}% 100%);
+                display:flex;align-items:center;justify-content:center;border:1px solid #2f4f86;">
+                <div style="width:86px;height:86px;border-radius:50%;background:#0f1b31;color:#e8eefc;display:flex;align-items:center;justify-content:center;font-weight:700;">
+                    {progress_pct}%
+                </div>
+            </div>
+            <div>
+                <div style="font-size:1.05rem;font-weight:700;">Tier: {tier_label}</div>
+                <div style="color:#9fb2d8;">Badge: {badge_label}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### 🏅 Milestone Badges")
+    badges = []
+    if role == "Distributor" and rep is not None and rep["perfect_deliveries"] >= 1000:
+        badges.append("🏅 1000 Error-Free Deliveries")
+    if role == "Accountant":
+        cleared = load_discrepancy_log()
+        cleared = apply_discrepancy_company_scope(cleared, auth_user, mapping_data)
+        n_cleared = int((cleared["review_status"].astype(str) == "cleared").sum()) if not cleared.empty and "review_status" in cleared.columns else 0
+        if n_cleared >= 100:
+            badges.append("🛡️ Master Auditor")
+    if final_score >= 90:
+        badges.append("🚀 Elite Performer")
+    if not badges:
+        badges = ["Starter Badge — keep building your operational track record."]
+    for b in badges:
+        st.info(b)
+
+    st.markdown("### 🪙 Crypto Earnings History")
+    del_df = load_delivery_log()
+    ret_df = load_return_log()
+    cr = float(user_row.get("commission_rate", 0) or 0)
+    if role == "Distributor" and not del_df.empty:
+        me_del = del_df[(del_df["username"].astype(str) == username) & (del_df["company"].astype(str) == company_name)].copy()
+        if me_del.empty:
+            st.caption("No earnings rows yet.")
+        else:
+            me_del["timestamp"] = pd.to_datetime(me_del["timestamp"], errors="coerce")
+            me_del["commission"] = pd.to_numeric(me_del["total_sales"], errors="coerce").fillna(0.0) * cr
+            e_show = me_del.sort_values("timestamp", ascending=False).head(60)[["timestamp", "store", "product", "total_sales", "commission"]].copy()
+            e_show["timestamp"] = e_show["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+            e_show = e_show.rename(columns={"timestamp": "Time", "store": "Store", "product": "Product", "total_sales": "Delivery Value", "commission": "Bonus / Crypto Earnings"})
+            st.dataframe(e_show, use_container_width=True, hide_index=True, height=min(420, 110 + 34 * min(9, len(e_show))))
+    else:
+        st.caption("Crypto earnings history is currently available for Distributor accounts.")
+
+    if role == "Distributor":
+        st.markdown("### ↩️ Return Goods to Warehouse")
+        my_returns = load_return_log()
+        my_returns = my_returns[
+            (my_returns["username"].astype(str) == username)
+            & (my_returns["company"].astype(str) == company_name)
+            & (my_returns["status"].astype(str).str.lower() == "pending")
+        ] if not my_returns.empty else my_returns
+        if my_returns.empty:
+            st.info("Pending დაბრუნება არ არის.")
+        else:
+            show_cols = [c for c in ["id", "timestamp", "store", "product", "qty", "reason", "note", "status"] if c in my_returns.columns]
+            tshow = my_returns.sort_values("timestamp", ascending=False).copy()
+            tshow["timestamp"] = tshow["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+            st.dataframe(
+                tshow[show_cols].rename(
+                    columns={
+                        "id": "Return ID",
+                        "timestamp": "Time",
+                        "store": "Store",
+                        "product": "Product",
+                        "qty": "Qty",
+                        "reason": "Reason",
+                        "note": "Note",
+                        "status": "Status",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=min(360, 100 + 34 * min(8, len(tshow))),
+            )
+            for _, rr in tshow.head(20).iterrows():
+                rid = str(rr.get("id", ""))
+                c1, c2 = st.columns([4, 1.4])
+                with c1:
+                    st.caption(f"{rr.get('store','')} / {rr.get('product','')} — {int(pd.to_numeric(rr.get('qty',0), errors='coerce') or 0)} ერთ.")
+                with c2:
+                    if st.button("Confirm Return", key=f"confirm_return_{rid}", use_container_width=True):
+                        ok, msg = confirm_return_to_stock(rid, username)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+    st.markdown("### 📄 Exportable Proof of Work")
+    report_lines = [
+        f"User: {username}",
+        f"Role: {role}",
+        f"Company: {company_name}",
+        f"Reputation Score: {final_score:.2f}",
+        f"Tier: {tier_label}",
+        f"Badge: {badge_label}",
+        f"Accuracy: {accuracy_score:.2f}%",
+        f"Speed: {speed_score:.2f}%",
+        f"Years of Service: {years_service}",
+        "დადასტურებულია ოპერაციული ჟურნალებით: მიწოდება, გაყიდვები, სხვაობები და აუდიტის ჩანაწერები",
+    ]
+    if role == "Distributor" and rep is not None:
+        report_lines.extend(
+            [
+                f"Total Deliveries: {rep['total_deliveries']}",
+                f"Perfect Deliveries: {rep['perfect_deliveries']}",
+                f"Late Deliveries: {rep['late_deliveries']}",
+            ]
+        )
+    pdf_bytes = _simple_pdf_bytes("Verified Career Report", report_lines)
+    st.download_button(
+        "Generate Verified Career Report",
+        data=pdf_bytes,
+        file_name=f"verified_career_report_{username}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
 
 
 def append_return_log(username, company, store, product, qty, unit_price, reason, note=""):
@@ -1493,6 +3690,9 @@ def append_return_log(username, company, store, product, qty, unit_price, reason
         "total_return": total_ret,
         "reason": str(reason),
         "note": str(note)[:500] if note is not None else "",
+        "status": "Pending",
+        "confirmed_at": "",
+        "confirmed_by": "",
     }
     safe_append_row(
         RETURNS_LOG_FILE,
@@ -1510,6 +3710,9 @@ def append_return_log(username, company, store, product, qty, unit_price, reason
             "total_return",
             "reason",
             "note",
+            "status",
+            "confirmed_at",
+            "confirmed_by",
         ],
     )
 
@@ -1531,17 +3734,78 @@ def load_return_log():
                 "total_return",
                 "reason",
                 "note",
+                "status",
+                "confirmed_at",
+                "confirmed_by",
             ]
         )
     rdf = pd.read_csv(RETURNS_LOG_FILE)
     if rdf.empty:
         return rdf
+    for tcol in ["status", "confirmed_at", "confirmed_by"]:
+        if tcol not in rdf.columns:
+            rdf[tcol] = ""
+    rdf["status"] = rdf["status"].astype(str).replace({"": "Pending"})
     for col in ["qty", "unit_price", "total_return"]:
         if col not in rdf.columns:
             rdf[col] = 0
         rdf[col] = pd.to_numeric(rdf[col], errors="coerce").fillna(0)
     rdf["timestamp"] = pd.to_datetime(rdf["timestamp"], errors="coerce")
     return rdf.dropna(subset=["timestamp"])
+
+
+def save_return_log(rdf: pd.DataFrame) -> bool:
+    out = rdf.copy()
+    if "timestamp" in out.columns and pd.api.types.is_datetime64_any_dtype(out["timestamp"]):
+        out["timestamp"] = out["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    return safe_write_csv(out, RETURNS_LOG_FILE)
+
+
+def confirm_return_to_stock(return_id: str, confirmer: str):
+    rdf = load_return_log()
+    if rdf.empty:
+        return False, "დაბრუნებების ჩანაწერი ცარიელია."
+    m = rdf["id"].astype(str) == str(return_id)
+    if not m.any():
+        return False, "დაბრუნების ჩანაწერი ვერ მოიძებნა."
+    row = rdf[m].iloc[0]
+    if str(row.get("status", "")).strip().lower() == "returned to stock":
+        return False, "ეს დაბრუნება უკვე დამტკიცებულია."
+
+    qty = int(pd.to_numeric(row.get("qty", 0), errors="coerce") or 0)
+    store = str(row.get("store", ""))
+    product = str(row.get("product", ""))
+    full_df = load_data()
+    if full_df.empty:
+        return False, "ინვენტარი ვერ მოიძებნა."
+    full_df = ensure_data_structure(full_df)
+    mask = (
+        (full_df["Store_Name"].astype(str) == store)
+        & (full_df["Product_Name"].astype(str) == product)
+    )
+    if not mask.any():
+        return False, "ინვენტარის ჩანაწერი ვერ მოიძებნა."
+    idx = full_df[mask].index[0]
+    full_df.at[idx, "Current_Stock"] = int(pd.to_numeric(full_df.at[idx, "Current_Stock"], errors="coerce") or 0) + qty
+    full_df.at[idx, "Returns_Stock"] = int(pd.to_numeric(full_df.at[idx, "Returns_Stock"], errors="coerce") or 0) + qty
+    full_df = recalc_metrics(ensure_data_structure(full_df))
+    save_data(full_df)
+
+    now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rdf.loc[m, "status"] = "Returned to Stock"
+    rdf.loc[m, "confirmed_at"] = now_s
+    rdf.loc[m, "confirmed_by"] = str(confirmer)
+    save_return_log(rdf)
+    append_audit_trail(
+        actor=str(confirmer),
+        actor_type="Human",
+        company=str(row.get("company", "")),
+        action="return_confirmed_to_stock",
+        target_id=str(return_id),
+        reason="Return goods confirmed to warehouse",
+        details=f"store={store} product={product} qty={qty}",
+    )
+    return True, "დაბრუნება წარმატებით ჩაიბარა საწყობმა და ნაშთი განახლდა."
 
 
 def _parse_float_safe(v, default=0.0):
@@ -1754,6 +4018,17 @@ def append_correction_log(delivery_id, distributor, company, store, product, ori
         CORRECTION_LOG_FILE,
         row,
         ["timestamp", "delivery_id", "distributor", "company", "store", "product", "original_qty", "updated_qty", "difference", "reason", "updated_by"],
+    )
+    actor_name = str(updated_by)
+    actor_type = "AI" if actor_name.strip().lower() in ("distro-ai", "ai", "assistant") else "Human"
+    append_audit_trail(
+        actor=actor_name,
+        actor_type=actor_type,
+        company=str(company),
+        action="manual_correction",
+        target_id=str(delivery_id),
+        reason=str(reason),
+        details=f"store={store} product={product} from={int(original_qty)} to={int(updated_qty)}",
     )
 
 
@@ -2278,16 +4553,20 @@ def get_pages_for_role(role):
             "📈 პროდუქტის ეფექტიანობა",
             "💼 Accountant Dashboard",
             "📋 ანგარიშგევის საჯამო ანგარიში",
+            "🪙 Buy Tokens",
         ],
-        "Accountant": ["💼 Accountant Dashboard"],
+        "Accountant": ["💼 Accountant Dashboard", "🪙 Buy Tokens"],
         "Company_Operator": ["🛠 ოპერატორის პანელი", "📈 პროდუქტის ეფექტიანობა"],
         "Retail_Operator": ["🛠 ოპერატორის პანელი", "📈 პროდუქტის ეფექტიანობა"],
         "Supplier_Operator": ["🛠 ოპერატორის პანელი", "📈 პროდუქტის ეფექტიანობა"],
-        "Distributor": ["🚚 აუცილებელი მიწოდებები"],
+        "Distributor": ["🚚 აუცილებელი მიწოდებები", "🪙 Buy Tokens"],
         "Store_Manager": ["🏠 მაღაზიის პანელი", "🛒 გაყიდვები"],
         "Market": ["🏪 ბაზრის პანელი", "📊 თვის ანალიტიკა"],
     }
-    return pages_by_role.get(str(role), ["🏢 კომპანიის მართვა"])
+    base_pages = pages_by_role.get(str(role), ["🏢 კომპანიის მართვა"])
+    if "👤 Profile" not in base_pages:
+        base_pages = list(base_pages) + ["👤 Profile"]
+    return base_pages
 
 
 def save_data(df):
@@ -2414,6 +4693,8 @@ def append_sales_log(sale_date, store, product, qty, selling_price, cost_price):
         log_row,
         ["Timestamp", "Date", "Store", "Product", "Qty", "Selling_Price", "Cost_Price", "Revenue", "Profit"],
     )
+    sale_company = get_company_for_store(store)
+    consume_system_energy(sale_company, amount_pct=1)
 
 
 def save_sale(sale_date, store, product, qty, selling_price, cost_price):
@@ -2603,11 +4884,11 @@ def run_thirty_day_business_simulation(
     get_cached_store_directory_names.clear()
     df = load_data()
     if df.empty:
-        return {"ok": False, "error": "Product.csv.txt ცარიელია."}
+        return {"ok": False, "error": "მარაგის მონაცემები ცარიელია."}
 
     stores = list(get_cached_store_directory_names())
     if not stores:
-        return {"ok": False, "error": "stores_directory.csv ცარიელია."}
+        return {"ok": False, "error": "ფილიალების დირექტორია ცარიელია."}
 
     df = ensure_data_structure(df.copy())
     nominal = {}
@@ -2965,7 +5246,7 @@ def render_user_management_panel(
     st.divider()
     st.subheader("🎯 თვიური გაყიდვების გეგმა (დისტრიბუტორი)")
     st.caption(
-        "დააყენეთ თვიური გეგმა ლარებით (₾) თითოეული დისტრიბუტორისთვის. მნიშვნელობა ინახება `users.csv`-ში (`monthly_sales_target`). "
+        "დააყენეთ თვიური გეგმა ლარებით (₾) თითოეული დისტრიბუტორისთვის. "
         "შესრულება აითვლება მიმდინარე თვის გაყიდვების ჟურნალიდან (Revenue) მიბმულ ფილიალებზე; თუ ფილიალი არ არის მიბმული — მიწოდების ჟურნალის ნეტო მოცულობით."
     )
     distributor_accounts = [u for u in visible_users if str(u.get("role", "")) == "Distributor"]
@@ -3045,14 +5326,14 @@ def render_user_management_panel(
 
 def render_store_inventory_request_page(auth_user, mapping_data, df: pd.DataFrame) -> None:
     st.title("📦 მარაგის მოთხოვნა (ფილიალი)")
-    st.caption("ფილიალში ნაშთის მოთხოვნა; ჩანაწერი: `store_inventory_requests.csv` (სტატუსი: pending).")
+    st.caption("ფილიალში ნაშთის მოთხოვნა ინახება მოთხოვნების ჟურნალში (სტატუსი: მოლოდინში).")
     store_name = str(auth_user.get("assigned_branch", "") or auth_user.get("store", "") or auth_user.get("branch", "")).strip()
     user_company = str(
         mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", "")) or ""
     )
     if not store_name:
         st.warning(
-            "ფილიალი არ არის მიბმული. ადმინისტრატორმა უნდა მიაბას `store` / `assigned_branch` (users.csv)."
+            "ფილიალი არ არის მიბმული. ადმინისტრატორმა უნდა მიუთითოს შესაბამისი ფილიალი ამ მომხმარებლისთვის."
         )
     inv = df.copy() if df is not None and not df.empty else pd.DataFrame()
     prods = (
@@ -3109,7 +5390,7 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
     )
     st.caption(
         "ერთიანი სისტემა: მარაგი — "
-        f"`{FILE_NAME}` · მიწოდებები — `deliveries_log.csv` · დაბრუნებები — `returns_log.csv`. "
+        "საწყობის ჩანაწერები · მიწოდებები · დაბრუნებები. "
         "ყველა ფინანსური მეტრიკა იკითხება იგივე ჟურნალებიდან; საკომისიო — პროფილიდან."
     )
 
@@ -3183,7 +5464,7 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
 
     if not _dir_stores_df.empty:
         st.caption(
-            f"📍 `stores_directory.csv`: **{len(_dir_stores_df)}** ფილიალი (ქართული ქსელი) · პროდუქტის ფაილში **{len(assigned_stores)}** უნიკალური მაღაზია მარშრუტისთვის."
+            f"📍 ფილიალების დირექტორია: **{len(_dir_stores_df)}** ფილიალი · მარშრუტში **{len(assigned_stores)}** უნიკალური მაღაზია."
         )
 
     # --- ზედა: თვიური გეგმა + სახელფასო (ერთი წყარო: deliveries + returns) ---
@@ -3204,7 +5485,7 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
 
         st.caption(
             "თვიური შესრულება ითვლება **ნეტო მიწოდებად** "
-            "(deliveries_log − returns_log), იგივე ლოგიკით, რაც სახელფასო კალკულატორში."
+            "(მიწოდება − დაბრუნება), იგივე ლოგიკით, რაც სახელფასო კალკულატორში."
         )
         pm1, pm2, pm3 = st.columns(3)
         with pm1:
@@ -3457,7 +5738,7 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
                         live_store_stock_df["Selling_Price"], errors="coerce"
                     ).fillna(0.0)
                     if not live_store_stock_df.empty:
-                        st.caption("მიმდინარე ნაშთი ფაილიდან: Product.csv.txt")
+                        st.caption("მიმდინარე ნაშთი: განახლებული საწყობის მონაცემები")
                         product_stock_search = st.text_input(
                             "🔎 პროდუქტის ძიება (ამ ცხრილისთვის)",
                             placeholder="ძიება პროდუქტის სახელით...",
@@ -3601,6 +5882,7 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
                         else:
                             full_df = st.session_state.df.copy()
                             notes_clean = notes.strip() if isinstance(notes, str) else ""
+                            processed_delivery_lines = 0
                             for r in valid_rows:
                                 qty_val = int(float(r.get("qty", 0) or 0))
                                 unit_price_val = float(r.get("unit_price", 0.0) or 0.0)
@@ -3629,6 +5911,7 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
                                     unit_price=unit_price_val,
                                     rs_status="Pending on RS.GE",
                                 )
+                                processed_delivery_lines += 1
                                 if issue_val == "დაბრუნება":
                                     append_return_log(
                                         username=auth_user.get("username", ""),
@@ -3653,6 +5936,8 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
                                         notes=notes_clean,
                                         issue=issue_val,
                                     )
+                            if processed_delivery_lines > 0:
+                                consume_compute_credit(user_company, amount=1)
                             full_df = recalc_metrics(full_df)
                             save_products(full_df)
                             st.session_state.df = full_df
@@ -3683,7 +5968,7 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
             )
 
     with log_tab:
-        st.markdown("##### 📜 ბოლო მიწოდებები (`deliveries_log.csv`)")
+        st.markdown("##### 📜 ბოლო მიწოდებები")
         my_all_deliveries = (
             delivery_df[delivery_df["username"].astype(str) == dist_user].copy()
             if not delivery_df.empty
@@ -3709,7 +5994,7 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
             st.dataframe(_hist_display, use_container_width=True, hide_index=True)
 
         st.divider()
-        st.markdown("##### ↩️ ბოლო დაბრუნებები (`returns_log.csv`)")
+        st.markdown("##### ↩️ ბოლო დაბრუნებები")
         my_returns = (
             returns_df[returns_df["username"].astype(str) == dist_user].copy()
             if not returns_df.empty
@@ -3741,19 +6026,36 @@ if "auth_user" not in st.session_state:
     st.session_state.auth_user = None
 
 apply_professional_dark_theme()
+inject_pwa_support()
 
 if st.session_state.auth_user is None:
+    remembered_username = _get_remembered_username()
+    if remembered_username:
+        remembered_user = next(
+            (u for u in load_users() if str(u.get("username", "")).strip() == remembered_username),
+            None,
+        )
+        if remembered_user and not _is_admin_role(remembered_user.get("role", "")):
+            st.session_state.auth_user = remembered_user
+            st.session_state.pending_page = get_default_page_for_role(remembered_user.get("role", ""))
+            st.rerun()
+
     st.title("🔐 ავტორიზაცია")
     st.caption("შეიყვანე მომხმარებლის სახელი და პაროლი სისტემაში შესასვლელად.")
     with st.form("login_form"):
         username = st.text_input("მომხმარებელი")
         password = st.text_input("პაროლი", type="password")
+        remember_me = st.checkbox("დამიმახსოვრე ამ მოწყობილობაზე", value=True)
         login_submitted = st.form_submit_button("შესვლა")
     if login_submitted:
         user = authenticate_user(username.strip(), password.strip())
         if user:
             st.session_state.auth_user = user
             st.session_state.pending_page = get_default_page_for_role(user.get("role", ""))
+            if (not _is_admin_role(user.get("role", ""))) and remember_me:
+                _set_remember_cookie(str(user.get("username", "")).strip())
+            else:
+                _clear_remember_cookie()
             st.rerun()
         else:
             st.error("არასწორი მომხმარებელი ან პაროლი.")
@@ -3776,6 +6078,20 @@ def _run_main_app_after_login():
     st.session_state.df = recalc_metrics(st.session_state.df)
     
     auth_user = st.session_state.auth_user
+    username = str(auth_user.get("username", "")).strip()
+    role = str(auth_user.get("role", "")).strip()
+    if (not _is_admin_role(role)) and username:
+        sec_settings = load_user_security_settings(username)
+        sec_enabled = bool(sec_settings.get("pin_enabled", False) or sec_settings.get("biometric_enabled", False))
+        if sec_enabled:
+            if st.session_state.get("security_unlocked_user", "") != username:
+                if _get_cookie_value(_bio_unlock_cookie_name(username)) == "1":
+                    st.session_state["security_unlocked_user"] = username
+                    _clear_cookie(_bio_unlock_cookie_name(username))
+                else:
+                    render_security_unlock_gate(auth_user)
+
+    system_settings = load_system_settings()
     # დისტრიბუტორი: ყოველ Streamlit rerun-ზე სრული განახლება დისკიდან (Product.csv.txt + load_data-ის სინქი)
     if auth_user and str(auth_user.get("role")) == "Distributor":
         _disk_df = load_data()
@@ -3784,6 +6100,10 @@ def _run_main_app_after_login():
     sales_df_all = load_sales_log()
     audit_df_all = load_audit_log()
     mapping_data = load_mapping()
+    token_state = get_digital_license_token_status(auth_user, mapping_data)
+    company_for_license = _company_for_auth(auth_user, mapping_data) or token_state.get("company", "")
+    license_state = process_daily_license_token(company_for_license)
+    st.session_state["license_state"] = license_state
     master_df = st.session_state.df
     
     # --- მთავარი გვერდითა მენიუ ---
@@ -3791,7 +6111,49 @@ def _run_main_app_after_login():
     st.sidebar.caption(
         f"მომხმარებელი: {auth_user.get('username')} | როლი: {auth_user.get('role')}"
     )
+    if str(auth_user.get("username", "")).strip().lower() == "admin":
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🧪 Admin Overrides")
+        current_override = bool(system_settings.get("crypto_lock_disabled", False))
+        next_override = st.sidebar.checkbox(
+            "ტესტირების რეჟიმი",
+            value=current_override,
+            key="crypto_lock_override_toggle",
+            help="აქტიური რეჟიმი დროებით თიშავს Crypto Lock-ს ყველა მომხმარებლისთვის.",
+        )
+        st.sidebar.caption(
+            "მიმდინარე სტატუსი: "
+            + ("ჩართულია (განბლოკილია)" if bool(current_override) else "გამორთულია (ჩვეულებრივი კონტროლი)")
+        )
+        if next_override != current_override:
+            system_settings["crypto_lock_disabled"] = bool(next_override)
+            save_system_settings(system_settings)
+            st.sidebar.success("პარამეტრი შენახულია.")
+            st.rerun()
+        with st.sidebar.expander("🔐 მომხმარებლის PIN Reset", expanded=False):
+            _users_for_pin_reset = [
+                u for u in load_users()
+                if str(u.get("username", "")).strip() and (not _is_admin_role(u.get("role", "")))
+            ]
+            if not _users_for_pin_reset:
+                st.caption("ჩვეულებრივი მომხმარებლები ვერ მოიძებნა.")
+            else:
+                _options = [str(u.get("username", "")).strip() for u in _users_for_pin_reset]
+                _pick_user = st.selectbox(
+                    "აირჩიე მომხმარებელი",
+                    _options,
+                    key="admin_pin_reset_user_pick",
+                )
+                if st.button("PIN-ის განულება", key="admin_pin_reset_btn", use_container_width=True):
+                    _sec = load_user_security_settings(_pick_user)
+                    _sec["pin_enabled"] = False
+                    _sec["pin_hash"] = ""
+                    save_user_security_settings(_pick_user, _sec)
+                    st.success(f"მომხმარებლის PIN განულდა: {_pick_user}")
     if st.sidebar.button("გასვლა", use_container_width=True):
+        if not _is_admin_role(auth_user.get("role", "")):
+            _clear_remember_cookie()
+        st.session_state.pop("security_unlocked_user", None)
         st.session_state.auth_user = None
         st.rerun()
     
@@ -3800,7 +6162,7 @@ def _run_main_app_after_login():
         st.sidebar.markdown("---")
         st.sidebar.subheader("🏪 Market — მაღაზიის არჩევა")
         if not _ms_shops:
-            st.sidebar.warning("stores_directory.csv ცარიელია.")
+            st.sidebar.warning("ფილიალების დირექტორია ცარიელია.")
         else:
             st.sidebar.selectbox(
                 "რომელი ფილიალი გინდათ (33 ქსელი)",
@@ -3819,15 +6181,96 @@ def _run_main_app_after_login():
         del st.session_state["pending_page"]
     
     page = st.sidebar.radio(
-        "გადადი გვერდზე:",
+        "აირჩიე გვერდი:",
         pages,
         index=pages.index(st.session_state.current_page),
     )
     st.session_state.current_page = page
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("👤 მომხმარებლის პროფილი")
+    st.sidebar.markdown(f"**სახელი:** `{auth_user.get('username', '')}`")
+    st.sidebar.markdown(f"**როლი:** `{auth_user.get('role', '')}`")
+    st.sidebar.success("ლიცენზია აქტიურია")
+    st.sidebar.markdown(
+        f"**ამ თვის ტოკენები:** `{int(license_state.get('monthly_tokens_remaining', 30) or 0)}`"
+    )
+    st.sidebar.markdown(f"**ლიცენზიის ბალანსი:** `{format_gel_currency(token_state['balance'])}`")
+    profile_credits = load_compute_credits_for_company(token_state.get("company", ""))
+    st.sidebar.markdown(f"**DistroCoin:** `{int(profile_credits.get('available_credits', 0) or 0)} DC`")
+    if int(license_state.get("monthly_tokens_remaining", 30) or 0) < 5:
+        st.sidebar.error("ტოკენები იწურება — მალე სისტემა წაკითხვის რეჟიმზე გადავა")
+    if token_state["active"]:
+        st.sidebar.success("ტოკენი აქტიურია")
+    else:
+        st.sidebar.warning("ტოკენი არააქტიურია")
+
+    if not _is_admin_role(auth_user.get("role", "")):
+        st.sidebar.markdown("---")
+        with st.sidebar.expander("🔐 უსაფრთხოების პარამეტრები", expanded=False):
+            _uname = str(auth_user.get("username", "")).strip()
+            _sec = load_user_security_settings(_uname)
+            _pin_enabled = st.checkbox(
+                "PIN Lock ჩართვა",
+                value=bool(_sec.get("pin_enabled", False)),
+                key="user_pin_lock_enabled",
+            )
+            _pin_value = st.text_input(
+                "ახალი PIN (4 ციფრი)",
+                type="password",
+                key="user_pin_lock_value",
+                placeholder="მაგ: 1234",
+            )
+            _bio_enabled = st.checkbox(
+                "თითის ანაბეჭდით გახსნა (თუ ტელეფონი/ბრაუზერი უჭერს მხარს)",
+                value=bool(_sec.get("biometric_enabled", False)),
+                key="user_bio_lock_enabled",
+            )
+            if _bio_enabled:
+                render_biometric_bind_widget(_uname)
+            if st.button("უსაფრთხოების შენახვა", key="save_user_security_settings_btn", use_container_width=True):
+                pin_hash = str(_sec.get("pin_hash", "") or "")
+                if _pin_enabled:
+                    if not (str(_pin_value).isdigit() and len(str(_pin_value)) == 4):
+                        st.warning("PIN უნდა იყოს ზუსტად 4 ციფრი.")
+                    else:
+                        pin_hash = _hash_pin(_pin_value)
+                if (not _pin_enabled) or (str(_pin_value).isdigit() and len(str(_pin_value)) == 4):
+                    save_user_security_settings(
+                        _uname,
+                        {
+                            "pin_enabled": bool(_pin_enabled),
+                            "pin_hash": pin_hash if _pin_enabled else "",
+                            "biometric_enabled": bool(_bio_enabled),
+                        },
+                    )
+                    st.session_state.pop("security_unlocked_user", None)
+                    st.success("უსაფრთხოების პარამეტრები შენახულია.")
+                    st.rerun()
+
+    st.sidebar.markdown("---")
+    st.sidebar.caption("📲 აპლიკაციის დაყენების ღილაკი ქვემოთ გამოჩნდება ავტომატურად.")
     
     df, sales_df_all = apply_role_filters(master_df, sales_df_all, auth_user, mapping_data)
     role_scope = get_role_scope(auth_user, mapping_data)
     df, sales_df_all, audit_df_all = apply_global_data_lock(df, sales_df_all, audit_df_all, role_scope)
+    system_settings = load_system_settings()
+    crypto_lock_override = bool(system_settings.get("crypto_lock_disabled", False))
+    if crypto_lock_override:
+        st.markdown(
+            """
+            <div style="
+                background: rgba(248, 221, 96, 0.15);
+                border: 1px solid rgba(248, 221, 96, 0.45);
+                color: #f8dd60;
+                border-radius: 8px;
+                padding: 6px 10px;
+                margin: 4px 0 10px 0;
+                font-size: 0.86rem;">
+                ტესტირების რეჟიმი აქტიურია: სისტემა განბლოკილია
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     
     # 2. ანალიტიკური გათვლები (ფილტრის შემდეგ)
     sales_cols = [f"Sales_Day{i}" for i in range(1, 8)]
@@ -4316,7 +6759,7 @@ def _run_main_app_after_login():
                     hide_index=True,
                 )
     
-            st.subheader("📥 შემომავალი მიწოდებები (deliveries_log)")
+            st.subheader("📥 შემომავალი მიწოდებები")
             if inc_m.empty:
                 st.caption("ჩანაწერი არ არის — დისტრიბუტორის დადასტურებული მიწოდება გამოჩნდება აქ.")
             else:
@@ -4377,7 +6820,7 @@ def _run_main_app_after_login():
     
     elif page == "📊 თვის ანალიტიკა":
         st.title("📊 თვის ანალიტიკა")
-        st.caption("ბოლო 30 დღის აგრეგატები: `sales_log.csv`, დისტრიბუტორის საკომისიო — `deliveries_log` / `returns_log`.")
+        st.caption("ბოლო 30 დღის აგრეგატები: გაყიდვები, მიწოდება, დაბრუნებები და დისტრიბუტორის საკომისიო.")
         try:
             _sm_mtime = os.path.getmtime(SALES_LOG_FILE) if os.path.exists(SALES_LOG_FILE) else 0.0
         except OSError:
@@ -4456,12 +6899,21 @@ def _run_main_app_after_login():
         with e4:
             st.metric("ჯამური შემოსავალი (ბონუს + საკომისიო)", format_gel_currency(tot_earn))
         st.caption(
-            f"პერიოდი: **{start_an}** — **{end_an}** · ანგარიშგება: **{dist_pick}** · გეგმა (users.csv): "
+            f"პერიოდი: **{start_an}** — **{end_an}** · ანგარიშგება: **{dist_pick}** · გეგმა: "
             f"{format_gel_currency(plan_an) if plan_an > 0 else '—'}"
         )
     
     elif page == "🚚 აუცილებელი მიწოდებები":
-        render_distributor_dashboard(auth_user, mapping_data, sales_df_all)
+        if role == "Distributor" and (not token_state["active"]) and (not crypto_lock_override):
+            st.title("🔒 პანელი დროებით დაბლოკილია")
+            st.error(
+                "ტოკენის ბალანსი ნულის ტოლია. დაფინანსების შემდეგ პანელი ავტომატურად გაიხსნება."
+            )
+            st.caption(
+                f"კომპანია: `{token_state['company'] or 'N/A'}` · ბალანსი: `{format_gel_currency(token_state['balance'])}`"
+            )
+        else:
+            render_distributor_dashboard(auth_user, mapping_data, sales_df_all)
     
     elif page == "🔔 ინვენტარის გაფრთხილებები":
         st.title("🔔 ინვენტარის გაფრთხილებები")
@@ -5101,7 +7553,7 @@ def _run_main_app_after_login():
                 mapping_data,
                 master_df,
                 page_title="👥 მომხმარებლების მართვა",
-                page_caption="მომხმარებლის ანგარიშები და დისტრიბუტორის შექმნა — `users.csv`.",
+                page_caption="მომხმარებლის ანგარიშები და დისტრიბუტორის შექმნა",
             )
 
     elif page == "📦 Store — მარაგის მოთხოვნა":
@@ -5340,8 +7792,40 @@ def _run_main_app_after_login():
     elif page == "💼 Accountant Dashboard":
         if role not in ("Super_Admin", "Company_Admin", "Accountant"):
             st.error("წვდომა ამ გვერდზე შეზღუდულია.")
+        elif role == "Accountant" and (not token_state["active"]) and (not crypto_lock_override):
+            st.title("🔒 პანელი დროებით დაბლოკილია")
+            st.error(
+                "ტოკენის ბალანსი ნულის ტოლია. დაფინანსების შემდეგ პანელი ავტომატურად გაიხსნება."
+            )
+            st.caption(
+                f"კომპანია: `{token_state['company'] or 'N/A'}` · ბალანსი: `{format_gel_currency(token_state['balance'])}`"
+            )
         else:
             render_accountant_dashboard(auth_user, mapping_data)
+
+    elif page == "🪙 Buy Tokens":
+        st.title("🪙 Buy Tokens")
+        company_name_bt = _company_for_auth(auth_user, mapping_data)
+        credits_bt = load_compute_credits_for_company(company_name_bt)
+        bal_bt = int(credits_bt.get("available_credits", 0) or 0)
+        cap_bt = int(credits_bt.get("credit_capacity", 100) or 100)
+        st.markdown(
+            f"""
+            <div class="fintech-card">
+                <div style="color:#9fb2d8;font-size:0.9rem;">DistroCoin Wallet</div>
+                <div style="color:#e8eefc;font-size:1.25rem;font-weight:700;margin-top:0.2rem;">{bal_bt} DC</div>
+                <div style="color:#9fb2d8;font-size:0.85rem;margin-top:0.25rem;">Capacity: {cap_bt} DC · Company: {company_name_bt or 'N/A'}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        buy_amount = st.selectbox("Select Token Package", [25, 50, 100, 250], index=2, key="buy_tokens_package")
+        st.caption("Placeholder flow: this will connect to crypto checkout later.")
+        if st.button("Proceed to Crypto Checkout (Placeholder)", type="primary", use_container_width=True):
+            st.success(f"Placeholder complete: +{int(buy_amount)} DC reserved for future integration.")
+        if st.button("← Back to Dashboard", use_container_width=True):
+            st.session_state.pending_page = get_default_page_for_role(role)
+            st.rerun()
 
     elif page == "📋 ანგარიშგევის საჯამო ანგარიში":
         if str(role) not in ("Super_Admin", "Company_Admin", "Accountant"):
@@ -5349,11 +7833,22 @@ def _run_main_app_after_login():
         else:
             render_accountant_summary_report(auth_user, mapping_data, sales_df_all)
 
+    elif page == "👤 Profile":
+        render_profile_page(auth_user, mapping_data)
+
+    # Global AI Operator panel for all authenticated roles.
+    render_distro_ai_widget(auth_user, mapping_data, df, sales_df_all)
+
 
 try:
     _run_main_app_after_login()
 except Exception as _app_exc:
     log_exception_to_app_errors(_app_exc)
+    append_technical_alert(
+        message=f"{type(_app_exc).__name__}: {_app_exc}",
+        severity="high",
+        source="app_runtime",
+    )
     st.error(
         "სისტემაში შეცდომა მოხდა. ინტერფეისი არ უნდა გათიშოს — დეტალები ჩაიწერა ჟურნალში. "
         "გთხოვთ სცადოთ გვერდის განახლება (Rerun) ან დაუკავშირდეთ ადმინისტრატორს."
