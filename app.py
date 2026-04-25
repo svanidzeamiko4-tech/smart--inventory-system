@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta, date
+import io
 import os
 import random
 import math
@@ -22,12 +23,80 @@ PENDING_DELIVERY_FILE = "pending_deliveries.csv"
 DISCREPANCY_LOG_FILE = "discrepancy_log.csv"
 CORRECTION_LOG_FILE = "correction_log.csv"
 ADJUSTMENT_REQUEST_FILE = "adjustment_requests.csv"
+STORE_INVENTORY_REQUEST_FILE = "store_inventory_requests.csv"
 TRUCK_STOCK_FILE = "truck_stock.csv"
 RETURNS_LOG_FILE = "returns_log.csv"
 APP_ERROR_LOG_FILE = "app_errors.log"
 STORES_DIRECTORY_FILE = "stores_directory.csv"
 # ერთიანი მარაგის ფაილი (UI/დოკ.: inventory.csv → იგივე Product.csv.txt)
 SHARED_INVENTORY_FILE = FILE_NAME
+
+
+def apply_professional_dark_theme() -> None:
+    """Global dark UI with blue actions and gold crypto accents."""
+    st.markdown(
+        """
+        <style>
+            :root {
+                --erp-bg: #0c1424;
+                --erp-bg-soft: #111c31;
+                --erp-card: #17243d;
+                --erp-border: #243a63;
+                --erp-text: #e8eefc;
+                --erp-muted: #9fb2d8;
+                --erp-blue: #2f80ff;
+                --erp-blue-2: #1f5ec9;
+                --erp-gold: #e2b93b;
+                --erp-gold-soft: #6b5316;
+            }
+            .stApp {
+                background: radial-gradient(1200px 700px at 10% -20%, #1a2b4a 0%, var(--erp-bg) 50%);
+                color: var(--erp-text);
+            }
+            .stSidebar {
+                background: linear-gradient(180deg, #0b1322 0%, #0f1b31 100%);
+                border-right: 1px solid var(--erp-border);
+            }
+            [data-testid="stMetric"] {
+                background: linear-gradient(145deg, #13213a, #0f1a2f);
+                border: 1px solid var(--erp-border);
+                border-radius: 12px;
+                padding: 0.55rem 0.7rem;
+            }
+            [data-testid="stMetricLabel"],
+            [data-testid="stMetricValue"],
+            [data-testid="stMetricDelta"] {
+                color: var(--erp-text);
+            }
+            .stButton > button,
+            .stDownloadButton > button {
+                background: linear-gradient(180deg, var(--erp-blue) 0%, var(--erp-blue-2) 100%);
+                color: #ffffff;
+                border: 1px solid #4e8ffc;
+                border-radius: 10px;
+                font-weight: 600;
+            }
+            .stButton > button:hover,
+            .stDownloadButton > button:hover {
+                filter: brightness(1.08);
+                border-color: #84b1ff;
+            }
+            .crypto-panel {
+                background: linear-gradient(145deg, #2f2406 0%, #1a1f2d 100%);
+                border: 1px solid var(--erp-gold-soft);
+                border-radius: 12px;
+                padding: 0.95rem;
+                box-shadow: 0 0 0 1px rgba(226,185,59,0.15) inset;
+                min-height: 132px;
+            }
+            .crypto-title { color: var(--erp-gold); font-weight: 700; font-size: 1.05rem; }
+            .crypto-value { color: #f2d885; font-weight: 700; font-size: 1.4rem; margin-top: 0.25rem; }
+            .crypto-muted { color: #ceb97c; font-size: 0.9rem; margin-top: 0.2rem; }
+            .subtle-divider { border-top: 1px solid var(--erp-border); margin: 0.8rem 0 0.9rem 0; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def log_exception_to_app_errors(exc: BaseException) -> None:
@@ -574,6 +643,9 @@ def ensure_auth_files():
                 "difference",
                 "reason",
                 "corrected_by",
+                "review_status",
+                "notes",
+                "issue",
             ]
         ).to_csv(DISCREPANCY_LOG_FILE, index=False)
 
@@ -792,8 +864,12 @@ def save_pending_deliveries(pdf):
     safe_write_csv(pdf, PENDING_DELIVERY_FILE)
 
 
-def append_discrepancy_log(distributor, company, store, product, ordered_qty, confirmed_qty, reason, corrected_by=""):
+def append_discrepancy_log(
+    distributor, company, store, product, ordered_qty, confirmed_qty, reason, corrected_by="", notes="", issue=""
+):
     diff = int(ordered_qty) - int(confirmed_qty)
+    # open = საბუღალტრო მიმოხილვა საჭირო; ნულოვანი სხვაობა — ავტომატურად cleared
+    review_status = "open" if int(diff) != 0 else "cleared"
     row = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "distributor": str(distributor),
@@ -803,27 +879,586 @@ def append_discrepancy_log(distributor, company, store, product, ordered_qty, co
         "ordered_qty": int(ordered_qty),
         "confirmed_qty": int(confirmed_qty),
         "difference": int(diff),
-        "reason": str(reason),
+        "reason": str(reason)[:2000] if reason is not None else "",
         "corrected_by": str(corrected_by),
+        "review_status": review_status,
+        "notes": (str(notes) if notes is not None else "")[:2000],
+        "issue": (str(issue) if issue is not None else "")[:500],
     }
     safe_append_row(
         DISCREPANCY_LOG_FILE,
         row,
-        ["timestamp", "distributor", "company", "store", "product", "ordered_qty", "confirmed_qty", "difference", "reason", "corrected_by"],
+        [
+            "timestamp",
+            "distributor",
+            "company",
+            "store",
+            "product",
+            "ordered_qty",
+            "confirmed_qty",
+            "difference",
+            "reason",
+            "corrected_by",
+            "review_status",
+            "notes",
+            "issue",
+        ],
     )
 
 
 def load_discrepancy_log():
     ensure_auth_files()
     if not os.path.exists(DISCREPANCY_LOG_FILE):
-        return pd.DataFrame(columns=["timestamp", "distributor", "company", "store", "product", "ordered_qty", "confirmed_qty", "difference", "reason", "corrected_by"])
+        return pd.DataFrame(
+            columns=[
+                "timestamp",
+                "distributor",
+                "company",
+                "store",
+                "product",
+                "ordered_qty",
+                "confirmed_qty",
+                "difference",
+                "reason",
+                "corrected_by",
+                "review_status",
+                "notes",
+                "issue",
+            ]
+        )
     dlog = pd.read_csv(DISCREPANCY_LOG_FILE)
     if dlog.empty:
         return dlog
     if "corrected_by" not in dlog.columns:
         dlog["corrected_by"] = ""
-    dlog["difference"] = pd.to_numeric(dlog["difference"], errors="coerce").fillna(0)
+    if "notes" not in dlog.columns:
+        dlog["notes"] = ""
+    if "issue" not in dlog.columns:
+        dlog["issue"] = ""
+    dlog["notes"] = dlog["notes"].fillna("").astype(str)
+    dlog["issue"] = dlog["issue"].fillna("").astype(str)
+    dlog["difference"] = pd.to_numeric(dlog["difference"], errors="coerce").fillna(0).astype(int)
+    if "review_status" not in dlog.columns:
+        dlog["review_status"] = dlog["difference"].apply(lambda d: "open" if d != 0 else "cleared")
+    else:
+        rs = dlog["review_status"].fillna("").astype(str).str.strip()
+        m_empty = rs == ""
+        dlog["review_status"] = rs
+        dlog.loc[m_empty & (dlog["difference"] != 0), "review_status"] = "open"
+        dlog.loc[m_empty & (dlog["difference"] == 0), "review_status"] = "cleared"
+    dlog["timestamp"] = pd.to_datetime(dlog["timestamp"], errors="coerce")
     return dlog
+
+
+def save_discrepancy_log(dlog: pd.DataFrame) -> bool:
+    out = dlog.copy()
+    if "timestamp" in out.columns and pd.api.types.is_datetime64_any_dtype(out["timestamp"]):
+        out["timestamp"] = out["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    return safe_write_csv(out, DISCREPANCY_LOG_FILE)
+
+
+def _company_for_auth(auth_user, mapping_data) -> str:
+    return str(
+        mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", "")) or ""
+    ).strip()
+
+
+def apply_discrepancy_company_scope(dlog, auth_user, mapping_data) -> pd.DataFrame:
+    """ანგარიშგება: Company_Admin / Accountant — მხოლოდ საკუთარი კომპანია; Super_Admin — ყველა."""
+    if dlog is None or dlog.empty:
+        return dlog if dlog is not None else pd.DataFrame()
+    role = str(auth_user.get("role", ""))
+    if role == "Super_Admin":
+        return dlog
+    if role in ("Company_Admin", "Accountant"):
+        uc = _company_for_auth(auth_user, mapping_data)
+        if not uc:
+            return dlog.iloc[0:0]
+        return dlog[dlog["company"].astype(str) == str(uc)]
+    return dlog.iloc[0:0]
+
+
+def apply_delivery_company_scope(ddf, auth_user, mapping_data) -> pd.DataFrame:
+    """deliveries_log: იგივე კომპანიის ფილტრი, რაც განსაკუთრებაზე."""
+    if ddf is None or ddf.empty:
+        return ddf if ddf is not None else pd.DataFrame()
+    role = str(auth_user.get("role", ""))
+    if role == "Super_Admin":
+        return ddf
+    if role in ("Company_Admin", "Accountant"):
+        uc = _company_for_auth(auth_user, mapping_data)
+        if not uc or "company" not in ddf.columns:
+            return ddf.iloc[0:0]
+        return ddf[ddf["company"].astype(str) == str(uc)]
+    return ddf.iloc[0:0]
+
+
+def apply_pending_company_scope(pdf, auth_user, mapping_data) -> pd.DataFrame:
+    """pending_deliveries: კომპანიის ფილტრი (შეკვეთების ღირებულობა)."""
+    if pdf is None or pdf.empty:
+        return pdf if pdf is not None else pd.DataFrame()
+    role = str(auth_user.get("role", ""))
+    if role == "Super_Admin":
+        return pdf
+    if role in ("Company_Admin", "Accountant"):
+        uc = _company_for_auth(auth_user, mapping_data)
+        if not uc or "company" not in pdf.columns:
+            return pdf.iloc[0:0]
+        return pdf[pdf["company"].astype(str) == str(uc)]
+    return pdf.iloc[0:0]
+
+
+def accountant_store_chain_label(store_name: str) -> str:
+    """მაგ. 'ნიკორა - ვაკე' -> 'ნიკორა' (ქსელის/ბრენდის ჯგუფი)."""
+    s = str(store_name or "").strip()
+    if " - " in s:
+        return s.split(" - ")[0].strip()
+    return s or "—"
+
+
+def _discrepancy_row_id(row) -> str:
+    ts = row.get("timestamp")
+    if isinstance(ts, str):
+        tss = ts.strip()
+    elif pd.isna(ts):
+        tss = ""
+    else:
+        tss = pd.Timestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    oq = int(float(row.get("ordered_qty", 0) or 0))
+    cq = int(float(row.get("confirmed_qty", 0) or 0))
+    return "|".join(
+        [
+            tss,
+            str(row.get("distributor", "")).strip(),
+            str(row.get("store", "")).strip(),
+            str(row.get("product", "")).strip(),
+            str(oq),
+            str(cq),
+        ]
+    )
+
+
+def mark_discrepancy_row_reviewed(row_id: str, auth_user, mapping_data):
+    full = load_discrepancy_log()
+    if full.empty:
+        return False, "ფაილი ცალია."
+    full["_rid"] = full.apply(lambda r: _discrepancy_row_id(r), axis=1)
+    m = full["_rid"] == str(row_id)
+    if not m.any():
+        return False, "ჩანაწერი ვერ მოიძებნა."
+    sub = full.loc[m]
+    if apply_discrepancy_company_scope(sub, auth_user, mapping_data).empty:
+        return False, "წვდომა აკრძალულია."
+    full.loc[m, "review_status"] = "cleared"
+    full = full.drop(columns=["_rid"], errors="ignore")
+    if save_discrepancy_log(full):
+        return True, "გადამოწმება მოინიშნა."
+    return False, "შენახვა ვერ მოხერხდა."
+
+
+def render_accountant_summary_report(auth_user, mapping_data, sales_df_all: pd.DataFrame) -> None:
+    """გაყიდვების + ფაქტიური მიწოდება + განსაკუთრება (sales_log, deliveries_log, discrepancy_log)."""
+    st.title("📋 ანგარიშგევის საჯამო ანგარიში")
+    st.caption(
+        "წყარო: `sales_log.csv` (რიტეილის გაყიდვები) · `deliveries_log.csv` (ფაქტიური მიწოდება) · "
+        "`discrepancy_log.csv` (შეკვეთა/მიღების სხვაობა, შენიშვნა/პრობლემა)."
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        acc_start = st.date_input("დაწყება", value=datetime.now().date() - timedelta(days=30), key="acc_rep_start")
+    with c2:
+        acc_end = st.date_input("დაბოლოება", value=datetime.now().date(), key="acc_rep_end")
+    if acc_start > acc_end:
+        st.error("დაწყების თარიღი უნდა იყოს დაბოლოების თარიღამდე.")
+        return
+
+    sdf = sales_df_all.copy() if sales_df_all is not None and not sales_df_all.empty else pd.DataFrame()
+    if not sdf.empty and "Timestamp" in sdf.columns:
+        sdf = sdf[(sdf["Timestamp"].dt.date >= acc_start) & (sdf["Timestamp"].dt.date <= acc_end)]
+
+    total_revenue = 0.0
+    total_profit = 0.0
+    n_sales = 0
+    items_sold = 0
+    if not sdf.empty:
+        n_sales = len(sdf)
+        for col in ("Revenue", "Profit"):
+            if col not in sdf.columns and col in ("Revenue", "Profit"):
+                sdf[col] = 0.0
+        if "Qty" in sdf.columns:
+            items_sold = int(pd.to_numeric(sdf["Qty"], errors="coerce").fillna(0).sum())
+        total_revenue = float(pd.to_numeric(sdf.get("Revenue", 0), errors="coerce").fillna(0).sum()) if "Revenue" in sdf.columns else 0.0
+        total_profit = float(pd.to_numeric(sdf.get("Profit", 0), errors="coerce").fillna(0).sum()) if "Profit" in sdf.columns else 0.0
+
+    ddf_raw = load_delivery_log()
+    ddf = apply_delivery_company_scope(ddf_raw, auth_user, mapping_data)
+    if not ddf.empty and "timestamp" in ddf.columns:
+        ddf = ddf[(ddf["timestamp"].dt.date >= acc_start) & (ddf["timestamp"].dt.date <= acc_end)]
+    del_revenue = 0.0
+    del_lines = 0
+    del_units = 0
+    if not ddf.empty:
+        del_lines = len(ddf)
+        del_revenue = float(pd.to_numeric(ddf["total_sales"], errors="coerce").fillna(0.0).sum()) if "total_sales" in ddf.columns else 0.0
+        if "qty" in ddf.columns:
+            del_units = int(pd.to_numeric(ddf["qty"], errors="coerce").fillna(0).sum())
+
+    st.subheader("გაყიდვები (რიტეილი, sales_log) — VS — ფაქტიური მიწოდება (deliveries_log)")
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("გაყიდვების ჩანაწერი (sales_log)", f"{n_sales}", help="POS/გაყიდვის ღიგაკი")
+    s2.metric("შემოსავალი (sales, ₾)", format_gel_currency(total_revenue))
+    s3.metric("ფაქტიური მიწოდება — ჩანაწერი", f"{del_lines}", help="bestätigte/ჩატარებული მიწოდება")
+    s4.metric("მიწოდების ღირებულ. (qty×ფასი, ₾)", format_gel_currency(del_revenue))
+    r1, r2 = st.columns(2)
+    with r1:
+        st.metric("გაყიდული ერთეული (sales, ჯამი Qty)", f"{items_sold}")
+    with r2:
+        st.metric("მიწოდებული ერთეული (deliveries, ჯამი)", f"{del_units}")
+    st.caption(
+        "შედარება: **რიტეილის** გაყიდვა (`Revenue`/`Profit`) — სხვაა უარყოფითი/ტრანსფერისგან; "
+        "**ფაქტიური მიწოდება** = დისტრიბუტორიდან ფილიალში (deliveries_log `total_sales`)."
+    )
+    gap = total_revenue - del_revenue
+    st.info(
+        f"**სხვაობა (შემოსავალი sales − ღირებ. მიწოდება):** {format_gel_currency(gap)}  "
+        "— ერთი არ უნდა ემთხვეოდეს ციფრ-ციფრს (სხვადასხვა ბაზაა); "
+        "მაგრყობელად აანს სრულ სურათს: რა გაიყიდა ბირჟაზე vs რა შევიდა მარაგში."
+    )
+
+    dlog_raw = load_discrepancy_log()
+    dlog = apply_discrepancy_company_scope(dlog_raw, auth_user, mapping_data)
+    if not dlog.empty and "timestamp" in dlog.columns:
+        dlog = dlog[(dlog["timestamp"].dt.date >= acc_start) & (dlog["timestamp"].dt.date <= acc_end)]
+
+    sum_diff = int(dlog["difference"].sum()) if not dlog.empty and "difference" in dlog.columns else 0
+    sum_abs = int(dlog["difference"].abs().sum()) if not dlog.empty and "difference" in dlog.columns else 0
+    n_nonzero = int((dlog["difference"] != 0).sum()) if not dlog.empty and "difference" in dlog.columns else 0
+    unresolved = pd.DataFrame()
+    if not dlog.empty and "review_status" in dlog.columns:
+        unresolved = dlog[(dlog["review_status"].astype(str) == "open") & (dlog["difference"] != 0)]
+    n_unresolved = len(unresolved)
+
+    st.subheader("შეკვეთა / მიღება — სხვაობები (discrepancy_log)")
+    b1, b2, b3, b4, b5 = st.columns(5)
+    b1.metric("ჩანაწერი (განსაკუთრება)", f"{len(dlog)}")
+    b2.metric("ჯამური სხვაობა (ც, ordered−confirmed)", f"{sum_diff:+d}")
+    b3.metric("|სხვაობა| (ერთ.)", f"{sum_abs}")
+    b4.metric("სხვაობიანი ხაზი", f"{n_nonzero}")
+    b5.metric("გადაუმოწმებელი (open)", f"{n_unresolved}", help="review_status=open და დელტა ≠ 0")
+    st.caption("სვეტები `notes` და `issue` = მაღაზიის/დისტრიბუტორის შენიშვნა და ტიპი (damaged, missing, …), სადაც ჩაიწერა.")
+
+    st.subheader("პროდუქტები — ყველაზე ხშირი განსაკუთრება")
+    if dlog.empty:
+        st.caption("პერიოდში `discrepancy_log` ჩანაწერი არაა.")
+        prod_freq = pd.DataFrame()
+    else:
+        nz = dlog[dlog["difference"] != 0]
+        if nz.empty:
+            st.caption("ყველა სხვაობა ნულია — ტოპ-სია ცარიელია.")
+            prod_freq = pd.DataFrame()
+        else:
+            prod_freq = (
+                nz.groupby("product", as_index=False)
+                .agg(
+                    discrepancy_events=("difference", "count"),
+                    total_abs_diff=("difference", lambda s: int(s.abs().sum())),
+                )
+                .sort_values("discrepancy_events", ascending=False)
+            )
+    if not prod_freq.empty:
+        st.dataframe(
+            prod_freq.rename(
+                columns={
+                    "product": "პროდუქტი",
+                    "discrepancy_events": "ინციდენტების რაოდენობა",
+                    "total_abs_diff": "|სხვაობა| (ერთ. ჯამში)",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.divider()
+    st.subheader("გადაუმოწმებელი (საბუღალტრო review) + შენიშვნები")
+    if dlog.empty:
+        st.info("შერჩეულ პერიოდში `discrepancy_log` ცალია — სხვაობიანი ხაზები/შენიშვნები ვერ ფიქსირდება.")
+    elif n_unresolved == 0:
+        st.success("ღია (open) review არაა — ყველა ხაზი გაწმინდა ან სხვაობა 0-ია.")
+    else:
+        st.warning(
+            f"**{n_unresolved}** ჩანაწერი **საჭიროებს მიმოხილვას** (ორდერისა და მიღების მოცულობა განსხვავებულია, `open`)."
+        )
+        u_show = unresolved.sort_values("timestamp", ascending=False).head(30).copy()
+        for _, urow in u_show.iterrows():
+            rid = _discrepancy_row_id(urow)
+            tstr = urow["timestamp"] if "timestamp" in urow and pd.notna(urow["timestamp"]) else "—"
+            iss = str(urow.get("issue", "") or "").strip() or "—"
+            nt = str(urow.get("notes", "") or "").strip() or "—"
+            st.markdown(
+                f"**{tstr}** | {urow.get('distributor', '')} / {urow.get('store', '')} / **{urow.get('product', '')}** · "
+                f"შეკვ: **{urow.get('ordered_qty', '')}** → მიღ: **{urow.get('confirmed_qty', '')}** (Δ**{urow.get('difference', '')}**)"
+            )
+            st.caption(f"**Issue:** {iss}  |  **Notes:** {nt[:500]}")
+            ukey = hashlib.md5(rid.encode("utf-8")).hexdigest()
+            if st.button("გადამოწმებულია (cleared)", key=f"acc_clear_{ukey}"):
+                ok, msg = mark_discrepancy_row_reviewed(rid, auth_user, mapping_data)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    st.divider()
+    st.subheader("ყველა განსაკუთრება (პერიოდი) — `reason`, `issue`, `notes`")
+    if dlog.empty:
+        st.caption("—")
+    else:
+        disp = dlog.sort_values("timestamp", ascending=False)
+        for col in ("ordered_qty", "confirmed_qty", "difference"):
+            if col in disp.columns:
+                disp[col] = pd.to_numeric(disp[col], errors="coerce").fillna(0).astype(int)
+        rename_map = {
+            "timestamp": "დრო",
+            "distributor": "დისტრიბუტორი",
+            "company": "კომპანია",
+            "store": "ფილიალი",
+            "product": "პროდუქტი",
+            "ordered_qty": "შეკვეთილი",
+            "confirmed_qty": "მიღებული",
+            "difference": "სხვაობა",
+            "reason": "მიზეზი (შეჯამება)",
+            "issue": "issue (შესაკეცი/ტიპი)",
+            "notes": "შენიშვნა",
+            "review_status": "საბუღალტრო status",
+        }
+        show = [c for c in rename_map if c in disp.columns]
+        st.dataframe(
+            disp[show].rename(columns=rename_map),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def render_accountant_dashboard(auth_user, mapping_data) -> None:
+    """
+    ცალკე ბუღალტრის სამუშაო სივრცე: შეკვეთა vs ფაქტი (₾), განსაკუთრებები, ფილიალის/ქსელის მიხედვით, ექსპორტი.
+    დისტრიბუტორის UI-თან არ უკავშირდება.
+    """
+    st.title("💼 Accountant Dashboard")
+    st.caption(
+        "ფინანსური მიმოხილვა: `pending_deliveries` (შეკვეთის ღირებულება) — `deliveries_log` (ფაქტიური მიწოდება). "
+        "განსაკუთრება: `discrepancy_log`."
+    )
+
+    d0, d1, d2 = st.columns([1, 1, 1])
+    with d0:
+        ad_start = st.date_input("დაწყება", value=datetime.now().date() - timedelta(days=30), key="acc_dash_start")
+    with d1:
+        ad_end = st.date_input("დაბოლოება", value=datetime.now().date(), key="acc_dash_end")
+    with d2:
+        st.caption("ფილტრი: ყველა ცხრილზე ერთი თარიღის საზღვარი")
+    if ad_start > ad_end:
+        st.error("დაწყება ≤ დაბოლოება")
+        return
+
+    role = str(auth_user.get("role", ""))
+    mdata = mapping_data if mapping_data is not None else load_mapping()
+    company_name = _company_for_auth(auth_user, mdata)
+
+    # --- ფინანსური მიმოხილვა: შეკვეთა (₾) vs ფაქტი (₾) ---
+    pending_r = load_pending_deliveries()
+    pending_r = apply_pending_company_scope(pending_r, auth_user, mdata)
+    if not pending_r.empty and "timestamp" in pending_r.columns:
+        pending_r = pending_r.copy()
+        pending_r["_ts"] = pd.to_datetime(pending_r["timestamp"], errors="coerce")
+        pending_r = pending_r[(pending_r["_ts"].dt.date >= ad_start) & (pending_r["_ts"].dt.date <= ad_end)]
+    ordered_gel = 0.0
+    n_order_lines = 0
+    if not pending_r.empty and "ordered_qty" in pending_r.columns and "unit_price" in pending_r.columns:
+        oq = pd.to_numeric(pending_r["ordered_qty"], errors="coerce").fillna(0)
+        up = pd.to_numeric(pending_r["unit_price"], errors="coerce").fillna(0.0)
+        ordered_gel = float((oq * up).sum())
+        n_order_lines = len(pending_r)
+
+    del_r = load_delivery_log()
+    del_r = apply_delivery_company_scope(del_r, auth_user, mdata)
+    if not del_r.empty and "timestamp" in del_r.columns:
+        del_r = del_r[(del_r["timestamp"].dt.date >= ad_start) & (del_r["timestamp"].dt.date <= ad_end)]
+    delivered_gel = 0.0
+    n_deliveries = 0
+    del_units = 0
+    if not del_r.empty:
+        n_deliveries = len(del_r)
+        if "total_sales" in del_r.columns:
+            delivered_gel = float(pd.to_numeric(del_r["total_sales"], errors="coerce").fillna(0.0).sum())
+        if "qty" in del_r.columns:
+            del_units = int(pd.to_numeric(del_r["qty"], errors="coerce").fillna(0).sum())
+
+    gap = ordered_gel - delivered_gel
+    left_col, right_col = st.columns([2.25, 1.0], gap="large")
+    with left_col:
+        st.subheader("Sales vs Actual Deliveries")
+        f1, f2, f3, f4 = st.columns(4)
+        f1.metric("Total Sales (Ordered, ₾)", format_gel_currency(ordered_gel))
+        f2.metric("Actual Deliveries (₾)", format_gel_currency(delivered_gel))
+        f3.metric("Gap (Ordered−Actual)", format_gel_currency(gap), delta=float(gap))
+        f4.metric("Order lines / Delivered units", f"{n_order_lines} / {del_units}")
+    with right_col:
+        _placeholder_btc = 0.0
+        _company_balance = 0.0
+        try:
+            _bdf = load_balances_for_company(company_name)
+            if not _bdf.empty and "balance" in _bdf.columns:
+                _company_balance = float(pd.to_numeric(_bdf["balance"], errors="coerce").fillna(0.0).sum())
+                _placeholder_btc = _company_balance / 200000.0
+        except Exception:
+            _placeholder_btc = 0.0
+            _company_balance = 0.0
+        st.markdown(
+            f"""
+            <div class="crypto-panel">
+                <div class="crypto-title">⛏️ Mining</div>
+                <div class="crypto-muted">Company wallet (placeholder)</div>
+                <div class="crypto-value">{_placeholder_btc:,.4f} BTC</div>
+                <div class="crypto-muted">Estimated fiat: {format_gel_currency(_company_balance)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown('<div class="subtle-divider"></div>', unsafe_allow_html=True)
+    st.caption("Ordered data: `pending_deliveries` | Actual deliveries: `deliveries_log`")
+
+    # --- განსაკუთრება: მხოლოდ ordered ≠ confirmed ---
+    dlog = load_discrepancy_log()
+    dlog = apply_discrepancy_company_scope(dlog, auth_user, mdata)
+    if not dlog.empty and "timestamp" in dlog.columns:
+        dlog = dlog[(dlog["timestamp"].dt.date >= ad_start) & (dlog["timestamp"].dt.date <= ad_end)]
+    if not dlog.empty and "ordered_qty" in dlog.columns and "confirmed_qty" in dlog.columns:
+        oq2 = pd.to_numeric(dlog["ordered_qty"], errors="coerce").fillna(0).astype(int)
+        cq2 = pd.to_numeric(dlog["confirmed_qty"], errors="coerce").fillna(0).astype(int)
+        disc_only = dlog.loc[oq2 != cq2].copy()
+    else:
+        disc_only = pd.DataFrame()
+
+    st.markdown("---")
+    st.subheader("Discrepancies (ordered_qty != confirmed_qty)")
+    st.caption("Includes `notes` and `issue` to explain quantity mismatches.")
+    if disc_only.empty:
+        st.info("აღნიშნულ პერიოდში/ფილტრზე «შეკვეთა ≠ მიღება» ჩანაწერი არაა (ან ყველა 0-ია).")
+    else:
+        dcols = [c for c in ["timestamp", "company", "distributor", "store", "product", "ordered_qty", "confirmed_qty", "difference", "issue", "notes", "reason", "review_status"] if c in disc_only.columns]
+        dshow = disc_only[dcols].copy()
+        if "timestamp" in dshow.columns and pd.api.types.is_datetime64_any_dtype(dshow["timestamp"]):
+            dshow["timestamp"] = dshow["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        st.dataframe(
+            dshow.rename(
+                columns={
+                    "timestamp": "დრო",
+                    "company": "კომპანია",
+                    "distributor": "დისტრიბუტორი",
+                    "store": "ფილიალი/მაღაზია",
+                    "product": "პროდუქტი",
+                    "ordered_qty": "შეკვეთა",
+                    "confirmed_qty": "მიღება",
+                    "difference": "Δ",
+                    "issue": "issue",
+                    "notes": "შენიშვნა",
+                    "reason": "მიზეზი",
+                    "review_status": "status",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+            height=min(560, 120 + 36 * min(14, len(dshow))),
+        )
+
+    # --- ფილიალი / ქსელი: ყველაზე ხშირი პრობლემები (მაგ. ნიკორა, სპარი) ---
+    st.markdown("---")
+    st.subheader("ფილიალი / ქსელი — მიწოდების პრობლემების სიხშირე")
+    st.caption("ჯგუფი «ქსელი» = ბრენდი სახელის **პირველი ნაწილი** (მაგ. «ნიკორა - ვაკე» → ნიკორა).")
+    if disc_only.empty:
+        st.caption("მონაცემი არაა.")
+        by_store = pd.DataFrame()
+        by_chain = pd.DataFrame()
+    else:
+        s_src = disc_only.copy()
+        if "store" in s_src.columns:
+            s_src["_chain"] = s_src["store"].astype(str).map(accountant_store_chain_label)
+        else:
+            s_src["_chain"] = "—"
+        if "store" in s_src.columns:
+            by_store = (
+                s_src.groupby("store", as_index=False)
+                .size()
+                .rename(columns={"store": "ფილიალი (სრული)", "size": "ინციდენტი"})
+                .sort_values("ინციდენტი", ascending=False)
+                .head(25)
+            )
+        else:
+            by_store = pd.DataFrame()
+        if "_chain" in s_src.columns:
+            by_chain = (
+                s_src.groupby("_chain", as_index=False)
+                .size()
+                .rename(columns={"_chain": "ქსელი / ბრენდი", "size": "ინციდენტი"})
+                .sort_values("ინციდენტი", ascending=False)
+                .head(25)
+            )
+        else:
+            by_chain = pd.DataFrame()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**ფილიალი (სრული სახელი)**")
+            st.dataframe(by_store if not by_store.empty else pd.DataFrame([{"": "—"}]), use_container_width=True, hide_index=True)
+        with c2:
+            st.markdown("**ქსელი (ნიკორა, სპარი, …)**")
+            st.dataframe(by_chain if not by_chain.empty else pd.DataFrame([{"": "—"}]), use_container_width=True, hide_index=True)
+
+    # --- ექსპორტი (CSV + Excel) ---
+    st.markdown("---")
+    st.subheader("ექსპორტი")
+    st.caption("ჩამოიტვირთეთ მიმდინარე ფილტრის განსაკუთრების ცხრილი (order≠confirm).")
+    ex1, ex2, ex3 = st.columns(3)
+    with ex1:
+        if not disc_only.empty:
+            csv_buf = disc_only.to_csv(index=False, encoding="utf-8-sig")
+            st.download_button(
+                label="⬇ ჩამოტვირთვა: CSV (UTF-8)",
+                data=csv_buf,
+                file_name=f"discrepancy_report_{ad_start}_{ad_end}.csv",
+                mime="text/csv",
+                key="acc_dash_csv_dl",
+                use_container_width=True,
+            )
+        else:
+            st.button("⬇ CSV (ცალია)", key="acc_dash_csv_empty", disabled=True, use_container_width=True)
+    with ex2:
+        if not disc_only.empty:
+            try:
+                xbuf = io.BytesIO()
+                d_exp = disc_only.copy()
+                if "timestamp" in d_exp.columns and pd.api.types.is_datetime64_any_dtype(d_exp["timestamp"]):
+                    d_exp["timestamp"] = d_exp["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+                with pd.ExcelWriter(xbuf, engine="openpyxl") as xw:
+                    d_exp.to_excel(xw, index=False, sheet_name="Discrepancies")
+                xbuf.seek(0)
+                st.download_button(
+                    label="⬇ ჩამოტვირთვა: Excel (xlsx)",
+                    data=xbuf.getvalue(),
+                    file_name=f"discrepancy_report_{ad_start}_{ad_end}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="acc_dash_xlsx_dl",
+                    use_container_width=True,
+                )
+            except Exception:
+                st.caption("Excel-ისთვის: `pip install openpyxl` (requirements-შიც).")
+        else:
+            st.button("⬇ Excel (ცალია)", key="acc_x_empty", disabled=True, use_container_width=True)
+    with ex3:
+        st.metric("გატანის სტრიქონი", f"{len(disc_only)}")
+
+    if role in ("Accountant",):
+        st.info("**Accountant** — მხოლოდ ბუღალტრიის პანელი. დისტრიბუტორის მიწოდება აქ არ ჩანს — გამოიყენეთ «ფაქტი (₾)» და `discrepancy` ქვემოთ.")
 
 
 def format_gel_currency(amount):
@@ -1187,6 +1822,53 @@ def update_adjustment_request_status(request_id, status, reviewed_by):
     return True
 
 
+def ensure_store_inventory_request_file() -> None:
+    ensure_auth_files()
+    if not os.path.exists(STORE_INVENTORY_REQUEST_FILE):
+        pd.DataFrame(
+            columns=[
+                "request_id",
+                "timestamp",
+                "username",
+                "company",
+                "store",
+                "product",
+                "qty_requested",
+                "reason",
+                "status",
+            ]
+        ).to_csv(STORE_INVENTORY_REQUEST_FILE, index=False)
+
+
+def load_store_inventory_requests() -> pd.DataFrame:
+    ensure_store_inventory_request_file()
+    rdf = pd.read_csv(STORE_INVENTORY_REQUEST_FILE, dtype=str).fillna("")
+    if not rdf.empty and "timestamp" in rdf.columns:
+        rdf["timestamp"] = pd.to_datetime(rdf["timestamp"], errors="coerce")
+    return rdf
+
+
+def append_store_inventory_request(username, company, store, product, qty_requested, reason) -> str:
+    ensure_store_inventory_request_file()
+    rdf = pd.read_csv(STORE_INVENTORY_REQUEST_FILE, dtype=str).fillna("")
+    ts = datetime.now().isoformat(timespec="seconds")
+    rid = f"sir_{int(datetime.now().timestamp() * 1000)}"
+    row = {
+        "request_id": rid,
+        "timestamp": ts,
+        "username": str(username),
+        "company": str(company),
+        "store": str(store),
+        "product": str(product),
+        "qty_requested": str(int(qty_requested)),
+        "reason": str(reason),
+        "status": "pending",
+    }
+    rdf = pd.concat([rdf, pd.DataFrame([row])], ignore_index=True)
+    safe_write_csv(rdf, STORE_INVENTORY_REQUEST_FILE)
+    return rid
+
+
 def load_truck_stock():
     ensure_auth_files()
     if not os.path.exists(TRUCK_STOCK_FILE):
@@ -1283,6 +1965,8 @@ def apply_delivery_correction(delivery_id, new_qty, reason, updated_by, full_df,
             confirmed_qty=int(new_qty),
             reason=f"Correction: {reason}",
             corrected_by=updated_by,
+            notes=str(reason) if reason is not None else "",
+            issue="24სთ კორექცია",
         )
     return True, "კორექცია შესრულდა.", full_df, delivery_df
 
@@ -1341,7 +2025,7 @@ def load_users():
                 {
                     "username": "admin",
                     "password_hash": hash_password("admin123"),
-                    "role": "Admin",
+                    "role": "Super_Admin",
                     "company": "Global",
                     "retail_chain": "Global",
                     "store": "",
@@ -1389,10 +2073,6 @@ def load_users():
                 safe_write_csv(mdf, MAPPING_FILE)
 
     users = users_df.to_dict("records")
-    for user in users:
-        # Backward compatibility if old Admin role exists
-        if user.get("role") == "Admin":
-            user["role"] = "Super_Admin"
     return users
 
 
@@ -1425,10 +2105,10 @@ def apply_role_filters(df, sales_df, auth_user, mapping_data):
     distributor_stores = mapping_data.get("distributor_stores", {})
     company = user_company.get(username, auth_user.get("company", ""))
 
-    if role == "Super_Admin":
+    if role in ("Super_Admin", "Admin"):
         return filtered_df, filtered_sales
 
-    if role == "Store_Manager":
+    if role in ("Store", "Store_Manager"):
         store_name = auth_user.get("assigned_branch", "") or auth_user.get("store", "")
         filtered_df = filtered_df[filtered_df["Store_Name"].astype(str) == str(store_name)]
         if not filtered_sales.empty:
@@ -1463,6 +2143,14 @@ def apply_role_filters(df, sales_df, auth_user, mapping_data):
         return filtered_df, filtered_sales
 
     if role == "Company_Admin":
+        allowed_products = set(company_products.get(company, set()))
+        if allowed_products:
+            filtered_df = filtered_df[filtered_df["Product_Name"].astype(str).isin(allowed_products)]
+            if not filtered_sales.empty:
+                filtered_sales = filtered_sales[filtered_sales["Product"].astype(str).isin(allowed_products)]
+        return filtered_df, filtered_sales
+
+    if role == "Accountant":
         allowed_products = set(company_products.get(company, set()))
         if allowed_products:
             filtered_df = filtered_df[filtered_df["Product_Name"].astype(str).isin(allowed_products)]
@@ -1506,15 +2194,17 @@ def get_role_scope(auth_user, mapping_data):
     distributor_stores = mapping_data.get("distributor_stores", {})
     company = user_company.get(username, auth_user.get("company", ""))
 
-    if role == "Super_Admin":
+    if role in ("Super_Admin", "Admin"):
         return {"role": role, "stores": None, "products": None}
-    if role == "Store_Manager":
+    if role in ("Store", "Store_Manager"):
         branch = auth_user.get("assigned_branch", "") or auth_user.get("store", "")
         return {"role": role, "stores": set([branch]) if branch else set(), "products": None}
     if role == "Market":
         ms = str(st.session_state.get("market_store_pick_main", "")).strip()
         return {"role": role, "stores": set([ms]) if ms else set(), "products": None}
     if role == "Company_Admin":
+        return {"role": role, "stores": None, "products": set(company_products.get(company, set()))}
+    if role == "Accountant":
         return {"role": role, "stores": None, "products": set(company_products.get(company, set()))}
     if role == "Company_Operator":
         return {"role": role, "stores": None, "products": set(company_products.get(company, set()))}
@@ -1531,7 +2221,7 @@ def get_role_scope(auth_user, mapping_data):
 
 
 def apply_global_data_lock(df, sales_df, audit_df, scope):
-    if scope["role"] == "Super_Admin":
+    if str(scope.get("role", "")) in ("Super_Admin", "Admin"):
         return df, sales_df, audit_df
 
     locked_df = df.copy()
@@ -1559,21 +2249,45 @@ def apply_global_data_lock(df, sales_df, audit_df, scope):
 
 
 def get_default_page_for_role(role):
-    if role == "Super_Admin":
-        return "🌍 გლობალური ანალიტიკა"
-    if role == "Company_Admin":
-        return "🤝 დისტრიბუტორების მართვა"
-    if role == "Company_Operator":
-        return "🛠 ოპერატორის პანელი"
-    if role in ["Retail_Operator", "Supplier_Operator"]:
-        return "🛠 ოპერატორის პანელი"
-    if role == "Distributor":
-        return "🚚 აუცილებელი მიწოდებები"
-    if role == "Store_Manager":
-        return "🏠 მაღაზიის პანელი"
-    if role == "Market":
-        return "🏪 ბაზრის პანელი"
-    return "🏢 კომპანიის მართვა"
+    pages = get_pages_for_role(role)
+    return pages[0] if pages else "🏢 კომპანიის მართვა"
+
+
+def get_pages_for_role(role):
+    """Role-based navigation source of truth used by sidebar and login redirect."""
+    pages_by_role = {
+        "Super_Admin": [
+            "🏢 კომპანიის მართვა",
+            "🌍 გლობალური ანალიტიკა",
+            "📊 თვის ანალიტიკა",
+            "🏠 მაღაზიის პანელი",
+            "🛒 გაყიდვები",
+            "📥 მარაგების მიღება",
+            "🚚 აუცილებელი მიწოდებები",
+            "🔔 ინვენტარის გაფრთხილებები",
+            "🤝 დისტრიბუტორების მართვა",
+            "📈 პროდუქტის ეფექტიანობა",
+            "📊 ანგარიშები",
+            "💼 Accountant Dashboard",
+            "📋 ანგარიშგევის საჯამო ანგარიში",
+        ],
+        "Admin": ["👥 მომხმარებლების მართვა"],
+        "Store": ["📦 Store — მარაგის მოთხოვნა"],
+        "Company_Admin": [
+            "🤝 დისტრიბუტორების მართვა",
+            "📈 პროდუქტის ეფექტიანობა",
+            "💼 Accountant Dashboard",
+            "📋 ანგარიშგევის საჯამო ანგარიში",
+        ],
+        "Accountant": ["💼 Accountant Dashboard"],
+        "Company_Operator": ["🛠 ოპერატორის პანელი", "📈 პროდუქტის ეფექტიანობა"],
+        "Retail_Operator": ["🛠 ოპერატორის პანელი", "📈 პროდუქტის ეფექტიანობა"],
+        "Supplier_Operator": ["🛠 ოპერატორის პანელი", "📈 პროდუქტის ეფექტიანობა"],
+        "Distributor": ["🚚 აუცილებელი მიწოდებები"],
+        "Store_Manager": ["🏠 მაღაზიის პანელი", "🛒 გაყიდვები"],
+        "Market": ["🏪 ბაზრის პანელი", "📊 თვის ანალიტიკა"],
+    }
+    return pages_by_role.get(str(role), ["🏢 კომპანიის მართვა"])
 
 
 def save_data(df):
@@ -2217,6 +2931,170 @@ def recalc_metrics(df):
     df["დღე ვადის გასვლამდე"] = (pd.to_datetime(df["Expiry_Date"]) - datetime.now()).dt.days
     return df
 
+
+def render_user_management_panel(
+    auth_user,
+    mapping_data,
+    master_df,
+    page_title: str = "🤝 დისტრიბუტორების მართვა",
+    page_caption: str = "Company Admin ქმნის Distributor ანგარიშებს მხოლოდ საკუთარი კომპანიისთვის.",
+) -> None:
+    st.title(page_title)
+    st.caption(page_caption)
+    users = load_users()
+    my_role = auth_user.get("role", "")
+    my_company = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
+    if my_role in ("Super_Admin", "Admin"):
+        visible_users = users
+    else:
+        visible_users = [u for u in users if str(u.get("company", "")) == str(my_company)]
+    users_display = pd.DataFrame(visible_users)[
+        ["username", "role", "company", "store", "allowed_stores", "allowed_products"]
+    ]
+    users_display = users_display.rename(
+        columns={
+            "username": "მომხმარებელი",
+            "role": "როლი",
+            "company": "კომპანია",
+            "store": "ფილიალი",
+            "allowed_stores": "ნებადართული ფილიალები",
+            "allowed_products": "ნებადართული პროდუქტები",
+        }
+    )
+    st.dataframe(users_display, use_container_width=True)
+    st.divider()
+    st.subheader("🎯 თვიური გაყიდვების გეგმა (დისტრიბუტორი)")
+    st.caption(
+        "დააყენეთ თვიური გეგმა ლარებით (₾) თითოეული დისტრიბუტორისთვის. მნიშვნელობა ინახება `users.csv`-ში (`monthly_sales_target`). "
+        "შესრულება აითვლება მიმდინარე თვის გაყიდვების ჟურნალიდან (Revenue) მიბმულ ფილიალებზე; თუ ფილიალი არ არის მიბმული — მიწოდების ჟურნალის ნეტო მოცულობით."
+    )
+    distributor_accounts = [u for u in visible_users if str(u.get("role", "")) == "Distributor"]
+    if not distributor_accounts:
+        st.info("დისტრიბუტორის ანგარიში ვერ მოიძებნა.")
+    else:
+        dist_names = [str(u.get("username", "")) for u in distributor_accounts if u.get("username")]
+        pick_dist = st.selectbox(
+            "დისტრიბუტორი",
+            dist_names,
+            key="admin_monthly_plan_pick_distributor",
+        )
+        cur_row = next(u for u in distributor_accounts if str(u.get("username", "")) == str(pick_dist))
+        cur_plan = get_user_monthly_sales_target(cur_row)
+        new_plan_val = st.number_input(
+            "თვიური გაყიდვების გეგმა — ჯამური თანხა (₾)",
+            min_value=0.0,
+            value=float(cur_plan),
+            step=500.0,
+            key="admin_monthly_plan_amount",
+        )
+        if st.button("გეგმის შენახვა", key="admin_save_monthly_plan_btn", type="primary"):
+            updated = load_users()
+            for u in updated:
+                if str(u.get("username", "")) == str(pick_dist):
+                    u["monthly_sales_target"] = str(round(float(new_plan_val), 2))
+                    break
+            save_users(updated)
+            st.success(f"თვიური გეგმა შენახულია: {pick_dist} → {format_gel_currency(new_plan_val)}")
+            st.rerun()
+    st.divider()
+    st.subheader("ახალი Distributor ანგარიშის შექმნა")
+    available_stores = sorted(master_df["Store_Name"].astype(str).unique().tolist()) if not master_df.empty else []
+    available_products = sorted(master_df["Product_Name"].astype(str).unique().tolist()) if not master_df.empty else []
+    with st.form("create_distributor_form"):
+        new_username = st.text_input("მომხმარებლის სახელი")
+        new_password = st.text_input("პაროლი", type="password")
+        if my_role in ("Super_Admin", "Admin"):
+            company_options = sorted(pd.DataFrame(users)["company"].replace("", pd.NA).dropna().unique().tolist())
+            company_options = company_options if company_options else ["Ifkli"]
+            new_company = st.selectbox("კომპანია", company_options)
+        else:
+            new_company = my_company
+            st.info(f"კომპანია: {new_company}")
+        assign_stores = st.multiselect("მისაწვდომი ფილიალები", options=available_stores)
+        assign_products = st.multiselect("მისაწვდომი პროდუქტები", options=available_products)
+        create_submitted = st.form_submit_button("Distributor ანგარიშის შექმნა")
+    if create_submitted:
+        if not new_username.strip() or not new_password.strip():
+            st.error("შეავსე მომხმარებლის სახელი და პაროლი.")
+        elif any(u.get("username") == new_username.strip() for u in users):
+            st.error("ასეთი მომხმარებელი უკვე არსებობს.")
+        else:
+            new_user = {
+                "username": new_username.strip(),
+                "password_hash": hash_password(new_password.strip()),
+                "role": "Distributor",
+                "company": new_company,
+                "store": "",
+                "allowed_stores": "|".join(assign_stores),
+                "allowed_products": "|".join(assign_products),
+                "commission_rate": "0.05",
+                "monthly_sales_target": "0",
+            }
+            users.append(new_user)
+            save_users(users)
+            map_df = mapping_data.get("df", pd.DataFrame(columns=["mapping_type", "key", "value"]))
+            map_rows = [{"mapping_type": "user_company", "key": new_username.strip(), "value": new_company}]
+            map_rows += [
+                {"mapping_type": "distributor_store", "key": new_username.strip(), "value": s} for s in assign_stores
+            ]
+            map_df = pd.concat([map_df, pd.DataFrame(map_rows)], ignore_index=True)
+            safe_write_csv(map_df, MAPPING_FILE)
+            st.success("Distributor ანგარიში წარმატებით შეიქმნა.")
+            st.rerun()
+
+
+def render_store_inventory_request_page(auth_user, mapping_data, df: pd.DataFrame) -> None:
+    st.title("📦 მარაგის მოთხოვნა (ფილიალი)")
+    st.caption("ფილიალში ნაშთის მოთხოვნა; ჩანაწერი: `store_inventory_requests.csv` (სტატუსი: pending).")
+    store_name = str(auth_user.get("assigned_branch", "") or auth_user.get("store", "") or auth_user.get("branch", "")).strip()
+    user_company = str(
+        mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", "")) or ""
+    )
+    if not store_name:
+        st.warning(
+            "ფილიალი არ არის მიბმული. ადმინისტრატორმა უნდა მიაბას `store` / `assigned_branch` (users.csv)."
+        )
+    inv = df.copy() if df is not None and not df.empty else pd.DataFrame()
+    prods = (
+        sorted(inv["Product_Name"].astype(str).unique().tolist())
+        if not inv.empty and "Product_Name" in inv.columns
+        else []
+    )
+    with st.form("store_inv_req_form"):
+        prod = st.selectbox("პროდუქტი", prods if prods else ["— (არცერთი)"])
+        qty = st.number_input("რაოდენობა", min_value=1, value=1, step=1)
+        reason = st.text_area("მიზეზი", placeholder="მაგ: ტრაიფიკი, აქცია...")
+        sub = st.form_submit_button("მოთხოვნის გაგზავნა", type="primary")
+    if sub:
+        if not store_name or not prods or prod == "— (არცერთი)":
+            st.error("ფილიალი ან პროდუქტი აკლია. შეამოწმე პროფილი ან მონაცემები.")
+        else:
+            append_store_inventory_request(
+                str(auth_user.get("username", "")),
+                user_company,
+                store_name,
+                prod,
+                int(qty),
+                reason.strip(),
+            )
+            st.success("მოთხოვნა ჩაიწერა.")
+            st.rerun()
+    st.divider()
+    st.subheader("შენი ბოლო მოთხოვნები")
+    hist = load_store_inventory_requests()
+    if not hist.empty and "username" in hist.columns:
+        hist = hist[hist["username"].astype(str) == str(auth_user.get("username", ""))]
+    if hist is None or hist.empty:
+        st.info("ჩანაწერები არ არის.")
+    else:
+        disp = hist.copy()
+        if "timestamp" in disp.columns and disp["timestamp"].dtype != "object":
+            pass
+        if "timestamp" in disp.columns:
+            disp = disp.sort_values("timestamp", ascending=False)
+        st.dataframe(disp.head(40), use_container_width=True, hide_index=True)
+
+
 def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
     """დისტრიბუტორის დაფა (ლოკალური კომპონენტი): გეგმა, სახელფასო, მაღაზიები, ძიება, მარშრუტი, ჟურნალები."""
     st.title("🚚 დისტრიბუტორის სუპერ დაფა")
@@ -2772,6 +3650,8 @@ def render_distributor_dashboard(auth_user, mapping_data, sales_df_all):
                                         confirmed_qty=qty_val,
                                         reason=f"შენიშვნა={issue_val if issue_val else 'არ არის'} | {notes_clean}",
                                         corrected_by=str(auth_user.get("username", "")),
+                                        notes=notes_clean,
+                                        issue=issue_val,
                                     )
                             full_df = recalc_metrics(full_df)
                             save_products(full_df)
@@ -2860,6 +3740,8 @@ if 'df' not in st.session_state:
 if "auth_user" not in st.session_state:
     st.session_state.auth_user = None
 
+apply_professional_dark_theme()
+
 if st.session_state.auth_user is None:
     st.title("🔐 ავტორიზაცია")
     st.caption("შეიყვანე მომხმარებლის სახელი და პაროლი სისტემაში შესასვლელად.")
@@ -2928,32 +3810,7 @@ def _run_main_app_after_login():
             st.sidebar.caption(f"საერთო ინვენტარი: `{SHARED_INVENTORY_FILE}` (= inventory / Product)")
     
     role = auth_user.get("role")
-    if role == "Super_Admin":
-        pages = [
-            "🏢 კომპანიის მართვა",
-            "🌍 გლობალური ანალიტიკა",
-            "📊 თვის ანალიტიკა",
-            "🏠 მაღაზიის პანელი",
-            "🛒 გაყიდვები",
-            "📥 მარაგების მიღება",
-            "🚚 აუცილებელი მიწოდებები",
-            "🔔 ინვენტარის გაფრთხილებები",
-            "🤝 დისტრიბუტორების მართვა",
-            "📈 პროდუქტის ეფექტიანობა",
-            "📊 ანგარიშები",
-        ]
-    elif role == "Company_Admin":
-        pages = ["🤝 დისტრიბუტორების მართვა", "📈 პროდუქტის ეფექტიანობა"]
-    elif role in ["Company_Operator", "Retail_Operator", "Supplier_Operator"]:
-        pages = ["🛠 ოპერატორის პანელი", "📈 პროდუქტის ეფექტიანობა"]
-    elif role == "Store_Manager":
-        pages = ["🏠 მაღაზიის პანელი", "🛒 გაყიდვები"]
-    elif role == "Market":
-        pages = ["🏪 ბაზრის პანელი", "📊 თვის ანალიტიკა"]
-    elif role == "Distributor":
-        pages = ["🚚 აუცილებელი მიწოდებები", "📊 თვის ანალიტიკა"]
-    else:
-        pages = ["🏢 კომპანიის მართვა"]
+    pages = get_pages_for_role(role)
     # Stable navigation: keep radio state separate from programmatic redirects.
     if "current_page" not in st.session_state or st.session_state.current_page not in pages:
         st.session_state.current_page = pages[0]
@@ -3091,13 +3948,20 @@ def _run_main_app_after_login():
             else:
                 st.sidebar.error(str(summary.get("error", "შეცდომა")))
     
-    low_stock_threshold = 5
-    low_stock_items = df[df["Current_Stock"] < low_stock_threshold]
-    if not low_stock_items.empty:
-        st.error(f"⚠️ კრიტიკული მარაგი: {len(low_stock_items)} პროდუქტი იწურება!")
-        with st.expander("იხილეთ სია"):
-            st.write(low_stock_items[["Product_Name", "Current_Stock"]])
-    
+    _hide_global_alerts = str(role) in (
+        "Accountant",
+        "Distributor",
+        "Store",
+        "Admin",
+    )
+    if not _hide_global_alerts:
+        low_stock_threshold = 5
+        low_stock_items = df[df["Current_Stock"] < low_stock_threshold]
+        if not low_stock_items.empty:
+            st.error(f"⚠️ კრიტიკული მარაგი: {len(low_stock_items)} პროდუქტი იწურება!")
+            with st.expander("იხილეთ სია"):
+                st.write(low_stock_items[["Product_Name", "Current_Stock"]])
+
     # --- გვერდი 1: DASHBOARD ---
     if page == "🏢 კომპანიის მართვა":
         st.title("🏢 კომპანიის მართვა")
@@ -3903,6 +4767,8 @@ def _run_main_app_after_login():
                                 confirmed_qty=int(final_qty),
                                 reason=reason if reason.strip() else "Unspecified",
                                 corrected_by=str(auth_user.get("username", "")),
+                                notes=str(p.get("notes", "") or "")[:2000],
+                                issue=str(p.get("issue", "") or "")[:500],
                             )
     
                         pending_df.loc[pending_df["id"].astype(str) == pid, "status"] = "confirmed"
@@ -4221,114 +5087,29 @@ def _run_main_app_after_login():
                     st.rerun()
     
     elif page == "🤝 დისტრიბუტორების მართვა":
-        st.title("🤝 დისტრიბუტორების მართვა")
-        st.caption("Company Admin ქმნის Distributor ანგარიშებს მხოლოდ საკუთარი კომპანიისთვის.")
-    
-        users = load_users()
-        my_role = auth_user.get("role", "")
-        my_company = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
-    
-        if my_role == "Super_Admin":
-            visible_users = users
+        if str(role) not in ("Super_Admin", "Company_Admin"):
+            st.error("წვდომა ამ გვერდზე შეზღუდულია.")
         else:
-            visible_users = [u for u in users if str(u.get("company", "")) == str(my_company)]
-    
-        users_display = pd.DataFrame(visible_users)[["username", "role", "company", "store", "allowed_stores", "allowed_products"]]
-        users_display = users_display.rename(
-            columns={
-                "username": "მომხმარებელი",
-                "role": "როლი",
-                "company": "კომპანია",
-                "store": "ფილიალი",
-                "allowed_stores": "ნებადართული ფილიალები",
-                "allowed_products": "ნებადართული პროდუქტები",
-            }
-        )
-        st.dataframe(users_display, use_container_width=True)
-    
-        st.divider()
-        st.subheader("🎯 თვიური გაყიდვების გეგმა (დისტრიბუტორი)")
-        st.caption(
-            "დააყენეთ თვიური გეგმა ლარებით (₾) თითოეული დისტრიბუტორისთვის. მნიშვნელობა ინახება `users.csv`-ში (`monthly_sales_target`). "
-            "შესრულება აითვლება მიმდინარე თვის გაყიდვების ჟურნალიდან (Revenue) მიბმულ ფილიალებზე; თუ ფილიალი არ არის მიბმული — მიწოდების ჟურნალის ნეტო მოცულობით."
-        )
-        distributor_accounts = [u for u in visible_users if str(u.get("role", "")) == "Distributor"]
-        if not distributor_accounts:
-            st.info("დისტრიბუტორის ანგარიში ვერ მოიძებნა.")
+            render_user_management_panel(auth_user, mapping_data, master_df)
+
+    elif page == "👥 მომხმარებლების მართვა":
+        if str(role) != "Admin":
+            st.error("წვდომა ამ გვერდზე შეზღუდულია.")
         else:
-            dist_names = [str(u.get("username", "")) for u in distributor_accounts if u.get("username")]
-            pick_dist = st.selectbox(
-                "დისტრიბუტორი",
-                dist_names,
-                key="admin_monthly_plan_pick_distributor",
+            render_user_management_panel(
+                auth_user,
+                mapping_data,
+                master_df,
+                page_title="👥 მომხმარებლების მართვა",
+                page_caption="მომხმარებლის ანგარიშები და დისტრიბუტორის შექმნა — `users.csv`.",
             )
-            cur_row = next(u for u in distributor_accounts if str(u.get("username", "")) == str(pick_dist))
-            cur_plan = get_user_monthly_sales_target(cur_row)
-            new_plan_val = st.number_input(
-                "თვიური გაყიდვების გეგმა — ჯამური თანხა (₾)",
-                min_value=0.0,
-                value=float(cur_plan),
-                step=500.0,
-                key="admin_monthly_plan_amount",
-            )
-            if st.button("გეგმის შენახვა", key="admin_save_monthly_plan_btn", type="primary"):
-                updated = load_users()
-                for u in updated:
-                    if str(u.get("username", "")) == str(pick_dist):
-                        u["monthly_sales_target"] = str(round(float(new_plan_val), 2))
-                        break
-                save_users(updated)
-                st.success(f"თვიური გეგმა შენახულია: {pick_dist} → {format_gel_currency(new_plan_val)}")
-                st.rerun()
-    
-        st.divider()
-        st.subheader("ახალი Distributor ანგარიშის შექმნა")
-        available_stores = sorted(master_df["Store_Name"].astype(str).unique().tolist()) if not master_df.empty else []
-        available_products = sorted(master_df["Product_Name"].astype(str).unique().tolist()) if not master_df.empty else []
-    
-        with st.form("create_distributor_form"):
-            new_username = st.text_input("მომხმარებლის სახელი")
-            new_password = st.text_input("პაროლი", type="password")
-    
-            if my_role == "Super_Admin":
-                company_options = sorted(pd.DataFrame(users)["company"].replace("", pd.NA).dropna().unique().tolist())
-                company_options = company_options if company_options else ["Ifkli"]
-                new_company = st.selectbox("კომპანია", company_options)
-            else:
-                new_company = my_company
-                st.info(f"კომპანია: {new_company}")
-    
-            assign_stores = st.multiselect("მისაწვდომი ფილიალები", options=available_stores)
-            assign_products = st.multiselect("მისაწვდომი პროდუქტები", options=available_products)
-            create_submitted = st.form_submit_button("Distributor ანგარიშის შექმნა")
-    
-        if create_submitted:
-            if not new_username.strip() or not new_password.strip():
-                st.error("შეავსე მომხმარებლის სახელი და პაროლი.")
-            elif any(u.get("username") == new_username.strip() for u in users):
-                st.error("ასეთი მომხმარებელი უკვე არსებობს.")
-            else:
-                new_user = {
-                    "username": new_username.strip(),
-                    "password_hash": hash_password(new_password.strip()),
-                    "role": "Distributor",
-                    "company": new_company,
-                    "store": "",
-                    "allowed_stores": "|".join(assign_stores),
-                    "allowed_products": "|".join(assign_products),
-                    "commission_rate": "0.05",
-                    "monthly_sales_target": "0",
-                }
-                users.append(new_user)
-                save_users(users)
-                map_df = mapping_data.get("df", pd.DataFrame(columns=["mapping_type", "key", "value"]))
-                map_rows = [{"mapping_type": "user_company", "key": new_username.strip(), "value": new_company}]
-                map_rows += [{"mapping_type": "distributor_store", "key": new_username.strip(), "value": s} for s in assign_stores]
-                map_df = pd.concat([map_df, pd.DataFrame(map_rows)], ignore_index=True)
-                safe_write_csv(map_df, MAPPING_FILE)
-                st.success("Distributor ანგარიში წარმატებით შეიქმნა.")
-                st.rerun()
-    
+
+    elif page == "📦 Store — მარაგის მოთხოვნა":
+        if str(role) != "Store":
+            st.error("წვდომა ამ გვერდზე შეზღუდულია.")
+        else:
+            render_store_inventory_request_page(auth_user, mapping_data, df)
+
     elif page == "🛠 ოპერატორის პანელი":
         st.title("🛠 ოპერატორის პანელი")
         operator_company = mapping_data.get("user_company", {}).get(auth_user.get("username", ""), auth_user.get("company", ""))
@@ -4555,6 +5336,18 @@ def _run_main_app_after_login():
                 st.dataframe(overview_display, use_container_width=True)
             else:
                 st.info("პროდუქტები არ არის დამატებული.")
+
+    elif page == "💼 Accountant Dashboard":
+        if role not in ("Super_Admin", "Company_Admin", "Accountant"):
+            st.error("წვდომა ამ გვერდზე შეზღუდულია.")
+        else:
+            render_accountant_dashboard(auth_user, mapping_data)
+
+    elif page == "📋 ანგარიშგევის საჯამო ანგარიში":
+        if str(role) not in ("Super_Admin", "Company_Admin", "Accountant"):
+            st.error("წვდომა ამ გვერდზე შეზღუდულია.")
+        else:
+            render_accountant_summary_report(auth_user, mapping_data, sales_df_all)
 
 
 try:
